@@ -1,0 +1,7 @@
+[
+  "'[excel.xlsx]DATA'!C2=result",
+  {
+    "ref": "'[excel.xlsx]DATA'!C4",
+    "key": "secondary_result"
+  }
+]

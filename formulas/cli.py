@@ -77,7 +77,10 @@ class ServeConfig:
     debug: bool
 
 
-@click.group()
+@click.group(
+    help='Work with Excel and JSON spreadsheet models from the command line.',
+    epilog="Use 'formulas COMMAND --help' for command-specific options and examples."
+)
 def cli():
     pass
 
@@ -749,29 +752,46 @@ def _create_serve_app(config):
     return app
 
 
-@cli.command()
-@click.argument('files', nargs=-1, type=click.Path(exists=True, dir_okay=False))
-@click.option('--out', 'outs_inline', multiple=True)
-@click.option('--outs', 'outs_file', type=click.Path(exists=True, dir_okay=False))
-@click.option('--output-file', type=click.Path(dir_okay=False))
-@click.option('--circular/--no-circular', default=False)
+@cli.command(
+    help='Export a reusable JSON model from workbook and JSON inputs.'
+)
+@click.argument('files', nargs=-1, type=click.Path(exists=True, dir_okay=False), metavar='FILES...')
+@click.option('--out', 'outs_inline', multiple=True,
+              help='Cell or range to keep in the exported model, together with its dependencies. Repeatable.')
+@click.option('--outs', 'outs_file', type=click.Path(exists=True, dir_okay=False),
+              help='JSON file with a list of cells or ranges to keep in the exported model.')
+@click.option('--output-file', type=click.Path(dir_okay=False),
+              help='Write the exported JSON model to a file instead of stdout.')
+@click.option('--circular/--no-circular', default=False,
+              help='Enable or disable circular reference solving while loading the model.')
 def build(files, outs_inline, outs_file, output_file, circular):
     logging.basicConfig(level=logging.WARNING)
     config = _normalize_build_config(files, outs_inline, outs_file, output_file, circular)
     _run_build(config)
 
 
-@cli.command(name='test')
-@click.argument('files', nargs=-1, type=click.Path(exists=True, dir_okay=False))
+@cli.command(
+    name='test',
+    help='Test whether formulas reproduces the reference workbook values.'
+)
+@click.argument('files', nargs=-1, type=click.Path(exists=True, dir_okay=False), metavar='FILES...')
 @click.option('--against', 'against', multiple=True,
-              type=click.Path(exists=True, dir_okay=False))
-@click.option('--overwrite', 'overwrites', multiple=True)
-@click.option('--out', 'outs_inline', multiple=True)
-@click.option('--outs', 'outs_file', type=click.Path(exists=True, dir_okay=False))
-@click.option('--tolerance', type=float, default=0.0, show_default=True)
-@click.option('--absolute-tolerance', type=float, default=.000001, show_default=True)
-@click.option('--summary', is_flag=True)
-@click.option('--circular/--no-circular', default=False)
+              type=click.Path(exists=True, dir_okay=False),
+              help='Reference workbook to compare against. Repeatable. Defaults to workbook inputs from FILES when omitted.')
+@click.option('--overwrite', 'overwrites', multiple=True,
+              help='Override a scalar cell with CELL=VALUE before testing. Strings must use double quotes; dates must use YYYY-MM-DD.')
+@click.option('--out', 'outs_inline', multiple=True,
+              help='Cell or range to test. Limits the comparison to the selected outputs. Repeatable.')
+@click.option('--outs', 'outs_file', type=click.Path(exists=True, dir_okay=False),
+              help='JSON file with a list of cells or ranges to test. Limits the comparison to the selected outputs.')
+@click.option('--tolerance', type=float, default=0.0, show_default=True,
+              help='Relative tolerance passed to the comparison engine.')
+@click.option('--absolute-tolerance', type=float, default=.000001, show_default=True,
+              help='Absolute tolerance passed to the comparison engine.')
+@click.option('--summary', is_flag=True,
+              help='Print a small text summary table before the comparison report.')
+@click.option('--circular/--no-circular', default=False,
+              help='Enable or disable circular reference solving while loading the model.')
 def test_command(files, against, overwrites, outs_inline, outs_file, tolerance,
                  absolute_tolerance, summary, circular):
     logging.basicConfig(level=logging.WARNING)
@@ -782,12 +802,18 @@ def test_command(files, against, overwrites, outs_inline, outs_file, tolerance,
     _emit_test_result(_run_test(config))
 
 
-@cli.command()
-@click.argument('files', nargs=-1, type=click.Path(exists=True, dir_okay=False))
-@click.option('--host', default='127.0.0.1', show_default=True)
-@click.option('--port', default=5000, type=int, show_default=True)
-@click.option('--debug/--no-debug', default=False)
-@click.option('--circular/--no-circular', default=False)
+@cli.command(
+    help='Start a Flask API server for a loaded spreadsheet model.'
+)
+@click.argument('files', nargs=-1, type=click.Path(exists=True, dir_okay=False), metavar='FILES...')
+@click.option('--host', default='127.0.0.1', show_default=True,
+              help='Host interface to bind the API server to.')
+@click.option('--port', default=5000, type=int, show_default=True,
+              help='Port to bind the API server to.')
+@click.option('--debug/--no-debug', default=False,
+              help='Enable or disable Flask debug mode.')
+@click.option('--circular/--no-circular', default=False,
+              help='Enable or disable circular reference solving while loading the model.')
 def serve(files, host, port, debug, circular):
     logging.basicConfig(level=logging.WARNING)
     config = _normalize_serve_config(files, host, port, circular, debug)
@@ -795,19 +821,32 @@ def serve(files, host, port, debug, circular):
     app.run(host=config.host, port=config.port, debug=config.debug)
 
 
-@cli.command()
-@click.argument('files', nargs=-1, type=click.Path(exists=True, dir_okay=False))
-@click.option('--overwrite', 'overwrites', multiple=True)
-@click.option('--batch', type=click.Path(exists=True, dir_okay=False))
-@click.option('--out', 'outs_inline', multiple=True)
-@click.option('--outs', 'outs_file', type=click.Path(exists=True, dir_okay=False))
-@click.option('--render', 'renders_inline', multiple=True)
-@click.option('--renders', 'renders_file', type=click.Path(exists=True, dir_okay=False))
-@click.option('--output-format', type=click.Choice(['excel', 'json']), required=True)
-@click.option('--output-dir', type=click.Path(file_okay=False))
-@click.option('--output-file', type=click.Path(dir_okay=False))
-@click.option('--processes', type=int, default=1, show_default=True)
-@click.option('--circular/--no-circular', default=False)
+@cli.command(
+    help='Calculate spreadsheet models from workbook and JSON inputs.'
+)
+@click.argument('files', nargs=-1, type=click.Path(exists=True, dir_okay=False), metavar='FILES...')
+@click.option('--overwrite', 'overwrites', multiple=True,
+              help='Override a scalar cell with CELL=VALUE. Strings must use double quotes; dates must use YYYY-MM-DD.')
+@click.option('--batch', type=click.Path(exists=True, dir_okay=False),
+              help='JSON file with a list of run definitions. Required for range overwrites and batch execution.')
+@click.option('--out', 'outs_inline', multiple=True,
+              help='Output cell or range to compute. Reduces computation scope. Repeatable.')
+@click.option('--outs', 'outs_file', type=click.Path(exists=True, dir_okay=False),
+              help='JSON file with a list of cells or ranges to compute. Reduces computation scope.')
+@click.option('--render', 'renders_inline', multiple=True,
+              help='Cell or range to emit in the result payload, optionally as REF=KEY. Also adds the ref to the computation scope. Repeatable.')
+@click.option('--renders', 'renders_file', type=click.Path(exists=True, dir_okay=False),
+              help='JSON file with a list of render specs. Reduces emitted output and implicitly extends computation scope.')
+@click.option('--output-format', type=click.Choice(['excel', 'json']), required=True,
+              help='Write results as JSON or Excel artifacts.')
+@click.option('--output-dir', type=click.Path(file_okay=False),
+              help='Output directory for batch JSON results or Excel run folders.')
+@click.option('--output-file', type=click.Path(dir_okay=False),
+              help='Output file for non-batch JSON results.')
+@click.option('--processes', type=int, default=1, show_default=True,
+              help='Number of worker processes for batch execution. Only valid with --batch.')
+@click.option('--circular/--no-circular', default=False,
+              help='Enable or disable circular reference solving while loading the model.')
 def calc(files, overwrites, batch, outs_inline, outs_file, renders_inline,
          renders_file, output_format, output_dir, output_file, processes, circular):
     logging.basicConfig(level=logging.WARNING)
@@ -852,8 +891,6 @@ def calc(files, overwrites, batch, outs_inline, outs_file, renders_inline,
         render_specs=render_specs,
     )
     result = _execute_scenario(model, scenario, output_format, output_dir=None)
-    for warning in result.get('warnings', ()):  # Keep single-run behavior aligned.
-        pass
     if output_format == 'json':
         if output_file:
             _write_json_result(result['data'], output_file=output_file)

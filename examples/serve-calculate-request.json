@@ -1,0 +1,9 @@
+{
+  "inputs": {
+    "'[excel.xlsx]'!INPUT_A": 3,
+    "'[excel.xlsx]DATA'!B3": 1
+  },
+  "renders": [
+    "'[excel.xlsx]DATA'!C2=result"
+  ]
+}

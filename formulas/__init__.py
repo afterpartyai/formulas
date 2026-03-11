@@ -23,6 +23,7 @@ Modules:
     ~functions
     ~ranges
     ~cell
+    ~cli
     ~excel
 """
 import os

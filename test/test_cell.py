@@ -7,6 +7,7 @@
 # You may obtain a copy of the Licence at: http://ec.europa.eu/idabc/eupl
 import time
 import unittest
+
 import ddt
 import schedula as sh
 from formulas.cell import Cell
@@ -908,8 +909,6 @@ class TestCell(unittest.TestCase):
          "<Ranges>(A1:A3)=[[0]\n [1]\n [2]]"),
         ('A1', '=HYPGEOM.DIST(0,2,3,3,1)', {}, "<Ranges>(A1)=[[0.0]]"),
         ('A1', '=HYPGEOM.DIST(0,0,0,0,0)', {}, "<Ranges>(A1)=[[1.0]]"),
-        ('A1', '=F.TEST({0.1,0.9,3.2,0.7},{0.1,0.2,0.3})', {},
-         "<Ranges>(A1)=[[0.010767145675124415]]"),
         ('A1', '=COVARIANCE.P({0.2,0.3,-0.1},{-0.1,"","29/02/1900"})', {},
          "<Ranges>(A1)=[[0.0]]"),
         ('A1', '=COVARIANCE.P({2,4,8},{5,11,12})', {},
@@ -1783,6 +1782,8 @@ class TestCell(unittest.TestCase):
         )
 
     @ddt.idata([
+        ('A1', '=F.TEST({0.1,0.9,3.2,0.7},{0.1,0.2,0.3})', {},
+         0.010767145675124415),
         ('A1', '=ODDFYIELD("2008-11-11","2021-3-1","2008-10-15","2009-3-1",0.07'
                '85,0.0625,100,2,1)', {}, 26.628136487894576),
         ('A1', '=ODDFPRICE("2008-11-11","2021-3-1","2007-10-15","2014-3-1",0.07'

@@ -68,6 +68,47 @@ development version:
 
     $ pip install https://github.com/vinci1it2000/formulas/archive/dev.zip
 
+
+CLI Quickstart
+==============
+
+The `formulas` command line interface accepts mixed `.xlsx`, `.ods`, and `.json`
+model inputs.
+
+Calculate a workbook
+--------------------
+
+.. code-block:: console
+
+    $ formulas calc test/test_files/excel.xlsx \
+        --overwrite "'[excel.xlsx]'!INPUT_A=3" \
+        --overwrite "'[excel.xlsx]DATA'!B3=1" \
+        --render "'[excel.xlsx]DATA'!C2=result" \
+        --output-format json
+
+Export a JSON model
+-------------------
+
+.. code-block:: console
+
+    $ formulas build test/test_files/excel.xlsx --output-file model.json
+
+Test a workbook
+---------------
+
+.. code-block:: console
+
+    $ formulas test test/test_files/excel.xlsx --summary
+
+Serve a model as an API
+-----------------------
+
+.. code-block:: console
+
+    $ formulas serve test/test_files/excel.xlsx --host 127.0.0.1 --port 5000
+
+Use ``formulas COMMAND --help`` for command-specific options and examples.
+
 .. _end-quick:
 
 Basic Examples
