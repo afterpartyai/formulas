@@ -14,10 +14,11 @@ import os.path as osp
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from formulas.cli import cli
+from formulas.cli import cli, _create_serve_app, _normalize_serve_config
 
 EXTRAS = os.environ.get('EXTRAS', 'all')
 mydir = osp.join(osp.dirname(__file__), 'test_files')
@@ -794,3 +795,57 @@ class TestCli(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn('FAIL', result.output)
         self.assertIn('missing_overwrites', result.output)
+
+    def test_serve_health_endpoint(self):
+        app = _create_serve_app(
+            _normalize_serve_config((self.excel,), '127.0.0.1', 5000, False, False)
+        )
+        response = app.test_client().get('/health')
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({'status': 'ok'}, response.get_json())
+
+    def test_serve_model_endpoint(self):
+        app = _create_serve_app(
+            _normalize_serve_config((self.excel, self.json_model), '127.0.0.1', 5000, False, False)
+        )
+        response = app.test_client().get('/model')
+        self.assertEqual(200, response.status_code)
+        data = response.get_json()
+        self.assertIn(self.excel, data['files'])
+        self.assertIn(self.json_model, data['files'])
+        self.assertGreater(data['nodes'], 0)
+
+    def test_serve_calculate_endpoint(self):
+        app = _create_serve_app(
+            _normalize_serve_config((self.excel,), '127.0.0.1', 5000, False, False)
+        )
+        response = app.test_client().post('/calculate', json={
+            'inputs': {
+                "'[excel.xlsx]'!INPUT_A": 3,
+                "'[excel.xlsx]DATA'!B3": 1
+            },
+            'renders': ["'[excel.xlsx]DATA'!C2=result"]
+        })
+        self.assertEqual(200, response.status_code)
+        data = response.get_json()
+        self.assertEqual({'result': 10.0}, data['outputs'])
+        self.assertEqual([], data['warnings'])
+
+    def test_serve_calculate_endpoint_validation(self):
+        app = _create_serve_app(
+            _normalize_serve_config((self.excel,), '127.0.0.1', 5000, False, False)
+        )
+        response = app.test_client().post('/calculate', json={'inputs': []})
+        self.assertEqual(400, response.status_code)
+        self.assertIn('`inputs` must be an object.', response.get_json()['error'])
+
+    def test_serve_command_runs_flask_app(self):
+        with patch('flask.app.Flask.run') as run_mock:
+            result = self.runner.invoke(cli, [
+                'serve', self.excel,
+                '--host', '0.0.0.0',
+                '--port', '5050',
+                '--debug',
+            ])
+        self.assertEqual(0, result.exit_code, result.output)
+        run_mock.assert_called_once_with(host='0.0.0.0', port=5050, debug=True)

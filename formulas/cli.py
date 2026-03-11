@@ -68,6 +68,15 @@ class TestConfig:
     summary: bool
 
 
+@dataclass(frozen=True)
+class ServeConfig:
+    files: tuple
+    host: str
+    port: int
+    circular: bool
+    debug: bool
+
+
 @click.group()
 def cli():
     pass
@@ -648,6 +657,98 @@ def _emit_test_result(result):
         raise click.exceptions.Exit(1)
 
 
+def _normalize_serve_config(files, host, port, circular, debug):
+    if not files:
+        raise CliError('At least one input file is required.')
+    return ServeConfig(
+        files=tuple(files),
+        host=host,
+        port=port,
+        circular=circular,
+        debug=debug,
+    )
+
+
+def _serialize_inputs(inputs):
+    return {
+        key: _extract_value(value)
+        for key, value in inputs.items()
+    }
+
+
+def _model_info(model, files):
+    return {
+        'files': list(files),
+        'books': sorted(model.books),
+        'nodes': len([node for node in model.dsp.data_nodes if not isinstance(node, sh.Token)]),
+    }
+
+
+def _calculate_from_payload(model, payload):
+    payload = payload or {}
+    if not isinstance(payload, dict):
+        raise CliError('JSON request body must be an object.')
+    raw_inputs = payload.get('inputs', {})
+    if not isinstance(raw_inputs, dict):
+        raise CliError('`inputs` must be an object.')
+    raw_outputs = payload.get('outputs', [])
+    if raw_outputs is None:
+        raw_outputs = []
+    if not isinstance(raw_outputs, list):
+        raise CliError('`outputs` must be a list.')
+    raw_renders = payload.get('renders', [])
+    if raw_renders is None:
+        raw_renders = []
+    if not isinstance(raw_renders, list):
+        raise CliError('`renders` must be a list.')
+
+    render_specs = [_parse_render_entry(item) for item in raw_renders]
+    compute_refs = list(dict.fromkeys(
+        [str(item) for item in raw_outputs] + [spec.ref for spec in render_specs]
+    ))
+    warnings = _collect_missing_messages(model, raw_inputs, compute_refs, render_specs)
+    solution = model.calculate(
+        inputs=_build_input_payload(raw_inputs),
+        outputs=compute_refs or None
+    )
+    rendered = _render_output(solution, render_specs, compute_refs)
+    return {
+        'inputs': _serialize_inputs(_build_input_payload(raw_inputs)),
+        'outputs': rendered,
+        'warnings': warnings,
+    }
+
+
+def _create_serve_app(config):
+    try:
+        from flask import Flask, jsonify, request
+    except ImportError as exc:  # pragma: no cover - import guard only.
+        raise CliError('Flask is required for `formulas serve`. Install the plot extra or flask.') from exc
+
+    model = _load_model(config.files, circular=config.circular)
+    app = Flask(__name__)
+    app.config['FORMULAS_MODEL'] = model
+    app.config['FORMULAS_INFO'] = _model_info(model, config.files)
+
+    @app.get('/health')
+    def health():
+        return jsonify({'status': 'ok'})
+
+    @app.get('/model')
+    def model_info():
+        return jsonify(app.config['FORMULAS_INFO'])
+
+    @app.post('/calculate')
+    def calculate_api():
+        try:
+            result = _calculate_from_payload(app.config['FORMULAS_MODEL'], request.get_json(silent=True))
+        except CliError as exc:
+            return jsonify({'error': exc.format_message()}), 400
+        return jsonify(result)
+
+    return app
+
+
 @cli.command()
 @click.argument('files', nargs=-1, type=click.Path(exists=True, dir_okay=False))
 @click.option('--out', 'outs_inline', multiple=True)
@@ -679,6 +780,19 @@ def test_command(files, against, overwrites, outs_inline, outs_file, tolerance,
         tolerance, absolute_tolerance, circular, summary
     )
     _emit_test_result(_run_test(config))
+
+
+@cli.command()
+@click.argument('files', nargs=-1, type=click.Path(exists=True, dir_okay=False))
+@click.option('--host', default='127.0.0.1', show_default=True)
+@click.option('--port', default=5000, type=int, show_default=True)
+@click.option('--debug/--no-debug', default=False)
+@click.option('--circular/--no-circular', default=False)
+def serve(files, host, port, debug, circular):
+    logging.basicConfig(level=logging.WARNING)
+    config = _normalize_serve_config(files, host, port, circular, debug)
+    app = _create_serve_app(config)
+    app.run(host=config.host, port=config.port, debug=config.debug)
 
 
 @cli.command()
