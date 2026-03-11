@@ -72,11 +72,12 @@ development version:
 CLI Quickstart
 ==============
 
-The `formulas` command line interface accepts mixed `.xlsx`, `.ods`, and `.json`
-model inputs.
+The `formulas` command-line interface works with spreadsheet models and
+accepts `.xlsx`, `.ods`, and `.json` inputs.
 
-Calculate a workbook
---------------------
+A typical workflow starts by calculating a workbook. You can override input
+values directly from the command line and request specific cells to be
+rendered in the output.
 
 .. code-block:: console
 
@@ -86,54 +87,38 @@ Calculate a workbook
         --render "'[excel.xlsx]DATA'!C2=result" \
         --output-format json
 
-Export a JSON model
--------------------
+Spreadsheet models can also be converted into a portable JSON representation.
+This is useful when the model needs to be versioned, inspected, or executed
+without the original workbook.
 
 .. code-block:: console
 
-    $ formulas build test/test_files/excel.xlsx --output-file model.json
+    $ formulas build test/test_files/excel.xlsx \
+        --output-file model.json
 
-Test a workbook
----------------
+For validation purposes, a workbook can be tested directly from the CLI.
+The following command runs the tests and prints a short summary.
 
 .. code-block:: console
 
     $ formulas test test/test_files/excel.xlsx --summary
 
-Serve a model as an API
------------------------
+Finally, a model can be exposed as a lightweight HTTP API, allowing other
+applications to execute it remotely. The `serve` command requires the optional
+web dependencies (`pip install formulas[web]`).
 
 .. code-block:: console
 
-    $ formulas serve test/test_files/excel.xlsx --host 127.0.0.1 --port 5000
+    $ formulas serve test/test_files/excel.xlsx \
+        --host 127.0.0.1 \
+        --port 5000
 
-Use ``formulas COMMAND --help`` for command-specific options and examples.
+Each command provides additional options and examples through the built-in
+help system:
 
+.. code-block:: console
 
-Reference Integration Demos
-===========================
-
-Formulas can also be embedded as a calculation engine inside lightweight
-applications and automated workflows, without requiring Excel or another
-spreadsheet GUI.
-
-The repository includes small reference integration demos showing how to reuse
-existing spreadsheet models in different environments:
-
-- `Flask + Jinja demo`
-  Loads a model once at startup, exposes it through HTTP endpoints, and adds a
-  minimal browser interface for entering inputs and viewing calculated outputs.
-
-- `Batch automation demo`
-  Runs one workbook template across multiple JSON scenarios and saves repeatable
-  JSON or Excel outputs.
-
-- `ETL transformer demo`
-  Treats a spreadsheet model as a transformation step that receives structured
-  records and emits structured computed results.
-
-See `examples/integrations/` and the integration documentation for runnable
-examples.
+    $ formulas COMMAND --help
 
 .. _end-quick:
 
@@ -339,6 +324,117 @@ An example how to add a custom function to the formula parser is the following:
     >>> func = formulas.Parser().ast('=MYFUNC(1, 2)')[1].compile()
     >>> func()
     4
+
+Advanced Examples
+=================
+
+Formulas can also be embedded as a calculation engine inside lightweight
+applications and automated workflows, without requiring Excel or another
+spreadsheet GUI.
+
+Minimal Flask integration
+-------------------------
+
+This example loads a workbook once, exposes it through a Flask application, and
+calls the JSON API through a test client.
+
+.. code-block:: python
+
+    from formulas.app import create_app
+
+    app = create_app(files=('test/test_files/excel.xlsx',), circular=False)
+    client = app.test_client()
+    response = client.post('/api/calculate', json={
+        'inputs': {
+            "'[excel.xlsx]'!INPUT_A": 3,
+            "'[excel.xlsx]DATA'!B3": 1,
+        },
+        'renders': ["'[excel.xlsx]DATA'!C2=result"],
+    })
+
+    assert response.status_code == 200
+    assert response.get_json()['outputs'] == {'result': 10.0}
+
+Batch automation
+----------------
+
+This example creates a temporary batch file and runs `formulas calc` over two
+scenarios.
+
+.. code-block:: python
+
+    import json
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        batch = Path(tmp) / 'batch.json'
+        batch.write_text(json.dumps([
+            {
+                'name': 'base',
+                'overwrite': {
+                    "'[excel.xlsx]'!INPUT_A": 3,
+                    "'[excel.xlsx]DATA'!B3": 1,
+                },
+                'renders': ["'[excel.xlsx]DATA'!C2=result"],
+            },
+            {
+                'name': 'stress',
+                'overwrite': {
+                    "'[excel.xlsx]'!INPUT_A": 4,
+                    "'[excel.xlsx]DATA'!B3": 1,
+                },
+                'renders': ["'[excel.xlsx]DATA'!C2=result"],
+            },
+        ], indent=2))
+
+        result = subprocess.run([
+            sys.executable, '-m', 'formulas.cli', 'calc',
+            'test/test_files/excel.xlsx',
+            '--batch', str(batch),
+            '--processes', '2',
+            '--output-format', 'json',
+            '--output-dir', tmp,
+        ], capture_output=True, text=True, check=False)
+
+        assert result.returncode == 0, result.stderr
+        summary = json.loads(result.stdout)
+        assert [item['name'] for item in summary] == ['base', 'stress']
+
+ETL transformer
+---------------
+
+This example treats a workbook as a transformation step over structured input
+records.
+
+.. code-block:: python
+
+    import formulas
+
+    model = formulas.ExcelModel().loads('test/test_files/excel.xlsx').finish()
+    func = model.compile(
+        inputs=["'[excel.xlsx]'!INPUT_A", "'[excel.xlsx]DATA'!B3"],
+        outputs=["'[excel.xlsx]DATA'!C2"],
+    )
+    records = [
+        {'id': 'row-1', 'input_a': 3, 'b3': 1},
+        {'id': 'row-2', 'input_a': 4, 'b3': 1},
+    ]
+    results = []
+
+    for record in records:
+        result, = func(record['input_a'], record['b3'])
+        results.append({
+            'id': record['id'],
+            'result': result.value[0, 0],
+        })
+
+    assert results == [
+        {'id': 'row-1', 'result': 10.0},
+        {'id': 'row-2', 'result': 11.0},
+    ]
 
 .. _end-pypi:
 

@@ -18,7 +18,8 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from formulas.cli import cli, _create_serve_app, _normalize_serve_config
+from formulas.app import create_app
+from formulas.cli import cli, _normalize_serve_config, _set_serve_environment
 
 EXTRAS = os.environ.get('EXTRAS', 'all')
 mydir = osp.join(osp.dirname(__file__), 'test_files')
@@ -797,18 +798,18 @@ class TestCli(unittest.TestCase):
         self.assertIn('missing_overwrites', result.output)
 
     def test_serve_health_endpoint(self):
-        app = _create_serve_app(
-            _normalize_serve_config((self.excel,), '127.0.0.1', 5000, False, False)
+        _set_serve_environment(
+            _normalize_serve_config((self.excel,), '127.0.0.1', 5000, False)
         )
-        response = app.test_client().get('/health')
+        response = create_app().test_client().get('/api/health')
         self.assertEqual(200, response.status_code)
         self.assertEqual({'status': 'ok'}, response.get_json())
 
     def test_serve_model_endpoint(self):
-        app = _create_serve_app(
-            _normalize_serve_config((self.excel, self.json_model), '127.0.0.1', 5000, False, False)
+        _set_serve_environment(
+            _normalize_serve_config((self.excel, self.json_model), '127.0.0.1', 5000, False)
         )
-        response = app.test_client().get('/model')
+        response = create_app().test_client().get('/api/model')
         self.assertEqual(200, response.status_code)
         data = response.get_json()
         self.assertIn(self.excel, data['files'])
@@ -816,10 +817,10 @@ class TestCli(unittest.TestCase):
         self.assertGreater(data['nodes'], 0)
 
     def test_serve_calculate_endpoint(self):
-        app = _create_serve_app(
-            _normalize_serve_config((self.excel,), '127.0.0.1', 5000, False, False)
+        _set_serve_environment(
+            _normalize_serve_config((self.excel,), '127.0.0.1', 5000, False)
         )
-        response = app.test_client().post('/calculate', json={
+        response = create_app().test_client().post('/api/calculate', json={
             'inputs': {
                 "'[excel.xlsx]'!INPUT_A": 3,
                 "'[excel.xlsx]DATA'!B3": 1
@@ -832,20 +833,30 @@ class TestCli(unittest.TestCase):
         self.assertEqual([], data['warnings'])
 
     def test_serve_calculate_endpoint_validation(self):
-        app = _create_serve_app(
-            _normalize_serve_config((self.excel,), '127.0.0.1', 5000, False, False)
+        _set_serve_environment(
+            _normalize_serve_config((self.excel,), '127.0.0.1', 5000, False)
         )
-        response = app.test_client().post('/calculate', json={'inputs': []})
+        response = create_app().test_client().post('/api/calculate', json={'inputs': []})
         self.assertEqual(400, response.status_code)
         self.assertIn('`inputs` must be an object.', response.get_json()['error'])
 
-    def test_serve_command_runs_flask_app(self):
-        with patch('flask.app.Flask.run') as run_mock:
+    def test_serve_gui_routes(self):
+        _set_serve_environment(
+            _normalize_serve_config((self.excel,), '127.0.0.1', 5000, False)
+        )
+        client = create_app().test_client()
+        self.assertEqual(200, client.get('/').status_code)
+        page = client.get('/').get_data(as_text=True)
+        self.assertIn("fetch('/api/calculate'", page)
+
+    def test_serve_command_invokes_schedula_runner(self):
+        with patch('schedula.utils.form.cli.run.invoke') as run_mock:
             result = self.runner.invoke(cli, [
                 'serve', self.excel,
                 '--host', '0.0.0.0',
                 '--port', '5050',
-                '--debug',
             ])
         self.assertEqual(0, result.exit_code, result.output)
-        run_mock.assert_called_once_with(host='0.0.0.0', port=5050, debug=True)
+        run_mock.assert_called_once()
+        self.assertEqual(json.dumps((self.excel,)), os.environ['FORMULAS_SERVE_FILES'])
+        self.assertEqual('false', os.environ['FORMULAS_SERVE_CIRCULAR'])

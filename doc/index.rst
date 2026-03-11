@@ -18,12 +18,6 @@
     :name: mastertoc
 
     doc
-    cli
-    cli-calc
-    cli-build
-    cli-test
-    cli-serve
-    integrations
     contrib
     sponsors
     api

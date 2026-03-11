@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Formulas Serve</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 2rem auto;
+            max-width: 960px;
+            line-height: 1.5;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 9rem;
+            font-family: monospace;
+        }
+
+        pre {
+            background: #f5f5f5;
+            padding: 1rem;
+            overflow-x: auto;
+        }
+
+        .panel {
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .error {
+            border-color: #c33;
+            background: #fff5f5;
+        }
+
+        .meta {
+            color: #555;
+        }
+
+        button {
+            padding: 0.6rem 1rem;
+        }
+    </style>
+</head>
+<body>
+<h1>Formulas Serve</h1>
+<p>This interface is backed by the same loaded model exposed through the <code>/api/*</code> endpoints.</p>
+
+<div class="panel meta">
+    <h2>Loaded Model</h2>
+    <p><strong>Files:</strong> {{ info.files|join(', ') }}</p>
+    <p><strong>Books:</strong> {{ info.books|join(', ') }}</p>
+    <p><strong>Nodes:</strong> {{ info.nodes }}</p>
+    <p><strong>API routes:</strong> <code>GET /api/health</code>, <code>GET /api/model</code>, <code>POST
+        /api/calculate</code></p>
+</div>
+
+{% if error %}
+<div id="error-panel" class="panel error">
+    <h2>Request Error</h2>
+    <p id="error-text">{{ error }}</p>
+</div>
+{% else %}
+<div id="error-panel" class="panel error hidden">
+    <h2>Request Error</h2>
+    <p id="error-text"></p>
+</div>
+{% endif %}
+
+<form id="calc-form" method="post" action="/calculate">
+    <div class="panel">
+        <h2>Calculate</h2>
+        <label for="inputs"><strong>inputs</strong> JSON object</label>
+        <textarea id="inputs" name="inputs">{}</textarea>
+
+        <label for="outputs"><strong>outputs</strong> JSON list</label>
+        <textarea id="outputs" name="outputs">[]</textarea>
+
+        <label for="renders"><strong>renders</strong> JSON list</label>
+        <textarea id="renders" name="renders">[]</textarea>
+
+        <p>
+            <button type="submit">Run calculation</button>
+        </p>
+    </div>
+</form>
+
+{% if result %}
+<div id="result-panel" class="panel">
+    <h2>Outputs</h2>
+    <pre id="outputs-json">{{ result.outputs | tojson(indent=2) }}</pre>
+    <h3>Warnings</h3>
+    <pre id="warnings-json">{{ result.warnings | tojson(indent=2) }}</pre>
+    <h3>Normalized Inputs</h3>
+    <pre id="inputs-json">{{ result.inputs | tojson(indent=2) }}</pre>
+</div>
+{% else %}
+<div id="result-panel" class="panel hidden">
+    <h2>Outputs</h2>
+    <pre id="outputs-json"></pre>
+    <h3>Warnings</h3>
+    <pre id="warnings-json"></pre>
+    <h3>Normalized Inputs</h3>
+    <pre id="inputs-json"></pre>
+</div>
+{% endif %}
+
+<script>
+    const form = document.getElementById('calc-form');
+    const errorPanel = document.getElementById('error-panel');
+    const errorText = document.getElementById('error-text');
+    const resultPanel = document.getElementById('result-panel');
+    const outputsJson = document.getElementById('outputs-json');
+    const warningsJson = document.getElementById('warnings-json');
+    const inputsJson = document.getElementById('inputs-json');
+
+    form.addEventListener('submit', async function (event) {
+        event.preventDefault();
+        errorPanel.classList.add('hidden');
+        resultPanel.classList.add('hidden');
+
+        let payload;
+        try {
+            payload = {
+                inputs: JSON.parse(document.getElementById('inputs').value || '{}'),
+                outputs: JSON.parse(document.getElementById('outputs').value || '[]'),
+                renders: JSON.parse(document.getElementById('renders').value || '[]')
+            };
+        } catch (error) {
+            errorText.textContent = 'Invalid JSON payload: ' + error.message;
+            errorPanel.classList.remove('hidden');
+            return;
+        }
+
+        const response = await fetch('/api/calculate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+            errorText.textContent = data.error || 'Unknown error';
+            errorPanel.classList.remove('hidden');
+            return;
+        }
+
+        outputsJson.textContent = JSON.stringify(data.outputs, null, 2);
+        warningsJson.textContent = JSON.stringify(data.warnings, null, 2);
+        inputsJson.textContent = JSON.stringify(data.inputs, null, 2);
+        resultPanel.classList.remove('hidden');
+    });
+</script>
+</body>
+</html>

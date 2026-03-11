@@ -23,8 +23,9 @@ Modules:
     ~functions
     ~ranges
     ~cell
-    ~cli
     ~excel
+    ~cli
+    ~app
 """
 import os
 import sys

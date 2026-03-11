@@ -1,8 +1,6 @@
--r base.pip
+-r web.pip
 
-flask
 regex
 graphviz
 Pygments
-jinja2
 docutils

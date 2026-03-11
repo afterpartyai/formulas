@@ -46,6 +46,7 @@ extensions = [
     'sphinx.ext.extlinks',
     'schedula.ext.autosummary',
     'schedula.ext.dispatcher',
+    'sphinx_click.ext'
 ]
 
 extlinks = {

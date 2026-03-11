@@ -5,7 +5,14 @@
 # Licensed under the EUPL (the 'Licence');
 # You may not use this work except in compliance with the Licence.
 # You may obtain a copy of the Licence at: http://ec.europa.eu/idabc/eupl
+r"""
+Define the command line interface.
 
+.. click:: formulas.cli:cli
+   :prog: formulas
+   :show-nested:
+
+"""
 import json
 import logging
 import multiprocessing as mp
@@ -17,16 +24,35 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 
 import click
+import click_log
 import schedula as sh
 
-from .excel import _convert_complex, _file2books, _res2books
 from .excel import ExcelModel
+from .excel import _convert_complex, _file2books, _res2books
 from .functions.date import xdate
 from .ranges import Ranges
 
-LOG = logging.getLogger(__name__)
 ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _WORKER_MODEL = ContextVar('worker_model')
+
+log = logging.getLogger('formulas.cli')
+
+
+class _Logger(logging.Logger):
+    def setLevel(self, level):
+        super(_Logger, self).setLevel(level)
+        frmt = "%(asctime)-15s:%(levelname)5.5s:%(name)s:%(message)s"
+        logging.basicConfig(level=level, format=frmt)
+        rlog = logging.getLogger()
+        # because `basicConfig()` does not reconfig root-logger when re-invoked.
+        rlog.level = level
+        logging.captureWarnings(True)
+        logging.getLogger('matplotlib').setLevel(logging.WARNING)
+        logging.getLogger('PIL').setLevel(logging.WARNING)
+
+
+logger = _Logger('cli')
+click_log.basic_config(logger)
 
 
 class CliError(click.ClickException):
@@ -74,7 +100,6 @@ class ServeConfig:
     host: str
     port: int
     circular: bool
-    debug: bool
 
 
 @click.group(
@@ -434,7 +459,7 @@ def _execute_batch(files, circular, scenarios, output_format, output_dir, proces
 def _emit_warnings(results):
     for result in results:
         for warning in result.get('warnings', ()):
-            LOG.warning(warning)
+            log.warning(warning)
 
 
 def _normalize_build_config(files, outs_inline, outs_file, output_file, circular):
@@ -487,7 +512,7 @@ def _run_build(config):
     model = _load_model(config.files, circular=config.circular)
     output_refs, warnings = _resolve_build_refs(model, config.output_refs)
     for warning in warnings:
-        LOG.warning(warning)
+        log.warning(warning)
     exported = _export_model_dict(model, output_refs)
     if not exported:
         raise CliError('Build produced no exportable model entries.')
@@ -608,11 +633,11 @@ def _run_test(config):
         model, config.overwrites, (), ()
     )
     for warning in missing_overwrite_messages:
-        LOG.warning(warning)
+        log.warning(warning)
 
     output_refs, missing_output_messages = _resolve_build_refs(model, config.output_refs)
     for warning in missing_output_messages:
-        LOG.warning(warning)
+        log.warning(warning)
 
     books = model.books
     solution = model.calculate(
@@ -660,96 +685,20 @@ def _emit_test_result(result):
         raise click.exceptions.Exit(1)
 
 
-def _normalize_serve_config(files, host, port, circular, debug):
+def _normalize_serve_config(files, host, port, circular):
     if not files:
         raise CliError('At least one input file is required.')
     return ServeConfig(
         files=tuple(files),
         host=host,
         port=port,
-        circular=circular,
-        debug=debug,
+        circular=circular
     )
 
 
-def _serialize_inputs(inputs):
-    return {
-        key: _extract_value(value)
-        for key, value in inputs.items()
-    }
-
-
-def _model_info(model, files):
-    return {
-        'files': list(files),
-        'books': sorted(model.books),
-        'nodes': len([node for node in model.dsp.data_nodes if not isinstance(node, sh.Token)]),
-    }
-
-
-def _calculate_from_payload(model, payload):
-    payload = payload or {}
-    if not isinstance(payload, dict):
-        raise CliError('JSON request body must be an object.')
-    raw_inputs = payload.get('inputs', {})
-    if not isinstance(raw_inputs, dict):
-        raise CliError('`inputs` must be an object.')
-    raw_outputs = payload.get('outputs', [])
-    if raw_outputs is None:
-        raw_outputs = []
-    if not isinstance(raw_outputs, list):
-        raise CliError('`outputs` must be a list.')
-    raw_renders = payload.get('renders', [])
-    if raw_renders is None:
-        raw_renders = []
-    if not isinstance(raw_renders, list):
-        raise CliError('`renders` must be a list.')
-
-    render_specs = [_parse_render_entry(item) for item in raw_renders]
-    compute_refs = list(dict.fromkeys(
-        [str(item) for item in raw_outputs] + [spec.ref for spec in render_specs]
-    ))
-    warnings = _collect_missing_messages(model, raw_inputs, compute_refs, render_specs)
-    solution = model.calculate(
-        inputs=_build_input_payload(raw_inputs),
-        outputs=compute_refs or None
-    )
-    rendered = _render_output(solution, render_specs, compute_refs)
-    return {
-        'inputs': _serialize_inputs(_build_input_payload(raw_inputs)),
-        'outputs': rendered,
-        'warnings': warnings,
-    }
-
-
-def _create_serve_app(config):
-    try:
-        from flask import Flask, jsonify, request
-    except ImportError as exc:  # pragma: no cover - import guard only.
-        raise CliError('Flask is required for `formulas serve`. Install the plot extra or flask.') from exc
-
-    model = _load_model(config.files, circular=config.circular)
-    app = Flask(__name__)
-    app.config['FORMULAS_MODEL'] = model
-    app.config['FORMULAS_INFO'] = _model_info(model, config.files)
-
-    @app.get('/health')
-    def health():
-        return jsonify({'status': 'ok'})
-
-    @app.get('/model')
-    def model_info():
-        return jsonify(app.config['FORMULAS_INFO'])
-
-    @app.post('/calculate')
-    def calculate_api():
-        try:
-            result = _calculate_from_payload(app.config['FORMULAS_MODEL'], request.get_json(silent=True))
-        except CliError as exc:
-            return jsonify({'error': exc.format_message()}), 400
-        return jsonify(result)
-
-    return app
+def _set_serve_environment(config):
+    os.environ['FORMULAS_SERVE_FILES'] = json.dumps(config.files)
+    os.environ['FORMULAS_SERVE_CIRCULAR'] = json.dumps(config.circular)
 
 
 @cli.command(
@@ -792,9 +741,9 @@ def build(files, outs_inline, outs_file, output_file, circular):
               help='Print a small text summary table before the comparison report.')
 @click.option('--circular/--no-circular', default=False,
               help='Enable or disable circular reference solving while loading the model.')
+@click_log.simple_verbosity_option(logger)
 def test_command(files, against, overwrites, outs_inline, outs_file, tolerance,
                  absolute_tolerance, summary, circular):
-    logging.basicConfig(level=logging.WARNING)
     config = _normalize_test_config(
         files, against, overwrites, outs_inline, outs_file,
         tolerance, absolute_tolerance, circular, summary
@@ -810,15 +759,20 @@ def test_command(files, against, overwrites, outs_inline, outs_file, tolerance,
               help='Host interface to bind the API server to.')
 @click.option('--port', default=5000, type=int, show_default=True,
               help='Port to bind the API server to.')
-@click.option('--debug/--no-debug', default=False,
-              help='Enable or disable Flask debug mode.')
 @click.option('--circular/--no-circular', default=False,
               help='Enable or disable circular reference solving while loading the model.')
-def serve(files, host, port, debug, circular):
-    logging.basicConfig(level=logging.WARNING)
-    config = _normalize_serve_config(files, host, port, circular, debug)
-    app = _create_serve_app(config)
-    app.run(host=config.host, port=config.port, debug=config.debug)
+@click_log.simple_verbosity_option(logger)
+@click.pass_context
+def serve(ctx, files, host, port, circular):
+    config = _normalize_serve_config(files, host, port, circular)
+    _set_serve_environment(config)
+    from schedula.utils.form import cli as _cli
+    ctx.params.clear()
+    ctx.params['folder'] = osp.dirname(osp.dirname(__file__))
+    ctx.params['app'] = 'formulas.app:create_app'
+    cmd = _cli.run
+    ctx.args.extend(['--bind', f'{host}:{port}'])
+    return cmd.invoke(ctx)
 
 
 @cli.command(
@@ -847,9 +801,9 @@ def serve(files, host, port, debug, circular):
               help='Number of worker processes for batch execution. Only valid with --batch.')
 @click.option('--circular/--no-circular', default=False,
               help='Enable or disable circular reference solving while loading the model.')
+@click_log.simple_verbosity_option(logger)
 def calc(files, overwrites, batch, outs_inline, outs_file, renders_inline,
          renders_file, output_format, output_dir, output_file, processes, circular):
-    logging.basicConfig(level=logging.WARNING)
     if not files:
         raise CliError('At least one input file is required.')
     if processes < 1:
@@ -881,7 +835,7 @@ def calc(files, overwrites, batch, outs_inline, outs_file, renders_inline,
 
     model = _load_model(files, circular=circular)
     for warning in _collect_missing_messages(model, overwrite_map, compute_refs, render_specs):
-        LOG.warning(warning)
+        log.warning(warning)
 
     scenario = Scenario(
         run_id=1,
@@ -898,7 +852,3 @@ def calc(files, overwrites, batch, outs_inline, outs_file, renders_inline,
             _write_json_result(result['data'])
         return
     raise CliError('Non-batch excel output requires `--output-dir`.')
-
-
-if __name__ == '__main__':
-    cli()
