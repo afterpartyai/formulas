@@ -81,6 +81,7 @@ if __name__ == '__main__':
             print('LONG DESCRIPTION ERROR:\n %r', ex)
 
     extras = {
+        'cli': ['click'],
         'excel': ['openpyxl', 'dictdiffer', 'ezodf', 'lxml'],
         'plot': ['graphviz', 'regex', 'flask', 'Pygments', 'jinja2', 'docutils']
     }
@@ -143,6 +144,7 @@ if __name__ == '__main__':
             'formulas.functions': ['*.json']
         },
         install_requires=[
+            'click',
             'regex',
             'schedula>=1.4.1',
             'numpy>=1.15',
@@ -152,5 +154,8 @@ if __name__ == '__main__':
             'tqdm'
         ],
         extras_require=extras,
-        tests_require=['ddt', 'dill', 'openpyxl']
+        tests_require=['ddt', 'dill', 'openpyxl', 'click'],
+        entry_points={
+            'console_scripts': ['formulas=formulas.cli:cli']
+        }
     )
