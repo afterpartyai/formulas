@@ -81,16 +81,16 @@ if __name__ == '__main__':
             print('LONG DESCRIPTION ERROR:\n %r', ex)
 
     extras = {
-        'cli': ['click', 'click_log', 'flask'],
         'excel': ['openpyxl', 'dictdiffer', 'ezodf', 'lxml'],
         'plot': ['graphviz', 'regex', 'flask', 'Pygments', 'jinja2', 'docutils']
     }
     # noinspection PyTypeChecker
+    extras['cli'] = extras['excel'] + ['click', 'click_log', 'flask']
     extras['all'] = sorted(functools.reduce(set.union, extras.values(), set()))
     extras['dev'] = extras['all'] + [
         'wheel', 'sphinx>=7.2', 'gitchangelog', 'mako', 'sphinx_rtd_theme',
         'setuptools>=36.0.1', 'sphinxcontrib-restbuilder', 'coveralls', 'ddt',
-        'twine'
+        'twine', 'sphinx_click'
     ]
 
     setup(
@@ -141,7 +141,8 @@ if __name__ == '__main__':
             "Topic :: Utilities",
         ],
         package_data={
-            'formulas.functions': ['*.json']
+            'formulas.functions': ['*.json'],
+            'formulas.gui': ['*']
         },
         install_requires=[
             'click',

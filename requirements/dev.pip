@@ -6,6 +6,7 @@ sphinx>=7.2
 gitchangelog
 mako
 twine
+sphinx_click
 sphinx_rtd_theme
 setuptools>=36.0.1
 sphinxcontrib-restbuilder

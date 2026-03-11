@@ -10,17 +10,19 @@
 It provides Function classes.
 """
 
+import collections
+import functools
+
 # noinspection PyCompatibility
 import regex
-import functools
-import collections
 import schedula as sh
+
+from formulas.functions import wrap_func
 from . import Token
-from .parenthesis import Parenthesis
 from .operand import Range
 from .operator import Separator
+from .parenthesis import Parenthesis
 from ..errors import TokenError, FormulaError, FoundError
-from formulas.functions import wrap_func
 
 
 class Function(Token):
@@ -249,11 +251,6 @@ class Lambda(Function):
             if self.has_call:
                 return wrap_func(func)
             return functools.partial(LambdaFunction, func)
-
-            for x in attr['vars']:
-                func.inputs.pop(x, None)
-                func.inputs[x] = None
-            return functools.partial(_lambda, func, wrapper=not self.has_call)
 
     def set_expr(self, *tokens):
         func = self.name.upper()

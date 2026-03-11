@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ ubuntu-latest ]
-        extra: [ base, excel, plot, all, dev ]
+        extra: [ base, excel, cli, plot, all, dev ]
         python-version: [ '3.11', '3.12', '3.13' ]
         include:
           - os: windows-latest

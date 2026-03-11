@@ -16,16 +16,17 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from click.testing import CliRunner
-
-from formulas.app import create_app
-from formulas.cli import cli, _normalize_serve_config, _set_serve_environment
-
+try:
+    from click.testing import CliRunner
+    from formulas.app import create_app
+    from formulas.cli import cli, _normalize_serve_config, _set_serve_environment
+except ImportError:
+    pass
 EXTRAS = os.environ.get('EXTRAS', 'all')
 mydir = osp.join(osp.dirname(__file__), 'test_files')
 
 
-@unittest.skipIf(EXTRAS not in ('all', 'excel'), 'Not for extra %s.' % EXTRAS)
+@unittest.skipIf(EXTRAS not in ('all', 'cli'), 'Not for extra %s.' % EXTRAS)
 class TestCli(unittest.TestCase):
     def setUp(self):
         self.runner = CliRunner()
