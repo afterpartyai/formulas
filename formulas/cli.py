@@ -898,3 +898,7 @@ def calc(files, overwrites, batch, outs_inline, outs_file, renders_inline,
             _write_json_result(result['data'])
         return
     raise CliError('Non-batch excel output requires `--output-dir`.')
+
+
+if __name__ == '__main__':
+    cli()

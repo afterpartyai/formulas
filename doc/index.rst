@@ -23,6 +23,7 @@
     cli-build
     cli-test
     cli-serve
+    integrations
     contrib
     sponsors
     api

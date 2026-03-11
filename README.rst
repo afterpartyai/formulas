@@ -109,6 +109,32 @@ Serve a model as an API
 
 Use ``formulas COMMAND --help`` for command-specific options and examples.
 
+
+Reference Integration Demos
+===========================
+
+Formulas can also be embedded as a calculation engine inside lightweight
+applications and automated workflows, without requiring Excel or another
+spreadsheet GUI.
+
+The repository includes small reference integration demos showing how to reuse
+existing spreadsheet models in different environments:
+
+- `Flask + Jinja demo`
+  Loads a model once at startup, exposes it through HTTP endpoints, and adds a
+  minimal browser interface for entering inputs and viewing calculated outputs.
+
+- `Batch automation demo`
+  Runs one workbook template across multiple JSON scenarios and saves repeatable
+  JSON or Excel outputs.
+
+- `ETL transformer demo`
+  Treats a spreadsheet model as a transformation step that receives structured
+  records and emits structured computed results.
+
+See `examples/integrations/` and the integration documentation for runnable
+examples.
+
 .. _end-quick:
 
 Basic Examples
