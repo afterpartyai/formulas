@@ -2,6 +2,39 @@ Changelog
 =========
 
 
+v1.3.4 (2026-03-11)
+-------------------
+
+Feat
+~~~~
+- (test): Add test for Excel function coverage and integrate README
+  summary.
+
+- (cli): add integration demos and docs.
+
+- (cli): Enhance CLI with expanded commands, detailed help, and
+  comprehensive examples.
+
+- (cli): Add `serve` command with Flask endpoints for health, model
+  info, and calculation.
+
+- (test): Add extensive tests for CLI model calculations and batch
+  processing.
+
+- (cli): Add comprehensive CLI for model building, testing, and
+  calculations.
+
+
+Fix
+~~~
+- (test): Adjust regex in test_cell for improved accuracy.
+
+
+Other
+~~~~~
+- Chore(docs): Remove CLI documentation and integration examples.
+
+
 v1.3.3 (2025-11-04)
 -------------------
 
