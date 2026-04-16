@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: UTF-8 -*-
 #
-# Copyright 2016-2025 European Commission (JRC);
+# Copyright 2016-2026 European Commission (JRC);
 # Licensed under the EUPL (the 'Licence');
 # You may not use this work except in compliance with the Licence.
 # You may obtain a copy of the Licence at: http://ec.europa.eu/idabc/eupl
@@ -39,51 +39,53 @@ BOOK = sh.Token('Book')
 SHEETS = sh.Token('Sheets')
 CIRCULAR = sh.Token('CIRCULAR')
 
-# ── Profiling (env FORMULAS_PROFILING=1 to enable) ──
+# Profiling support (set env FORMULAS_PROFILING=1 to enable).
 import time as _ptime
 import collections as _pcoll
 _PROF = os.environ.get('FORMULAS_PROFILING', '0') == '1'
 _prof = _pcoll.defaultdict(lambda: {'t': 0.0, 'n': 0})
 
+
 def _prof_reset():
     _prof.clear()
+
 
 def _prof_report():
     if not _prof:
         return
-    print(f"\n{'='*80}")
-    print(f"  FORMULAS LIBRARY INTERNAL PROFILE")
-    print(f"{'='*80}")
+    print(f"\n{'=' * 80}")
+    print("  FORMULAS LIBRARY INTERNAL PROFILE")
+    print(f"{'=' * 80}")
     items = sorted(_prof.items(), key=lambda x: -x[1]['t'])
     print(f"  {'Operation':<45s} {'Time':>10s} {'Count':>8s} {'Avg':>10s}")
-    print(f"  {'-'*45} {'-'*10} {'-'*8} {'-'*10}")
+    print(f"  {'-' * 45} {'-' * 10} {'-' * 8} {'-' * 10}")
     for name, d in items:
         avg = d['t'] / d['n'] if d['n'] else 0
         print(f"  {name:<45s} {d['t']:>9.3f}s {d['n']:>8d} {avg:>9.4f}s")
     total = sum(d['t'] for d in _prof.values())
-    print(f"  {'-'*45} {'-'*10}")
+    print(f"  {'-' * 45} {'-' * 10}")
     print(f"  {'TOTAL profiled':<45s} {total:>9.3f}s")
-    print(f"{'='*80}\n")
-# ── End profiling ──
+    print(f"{'=' * 80}\n")
 
-# ── Progress callback + abort flag ──
-# Set these from the caller (e.g. ExcelServiceLib) before calling loads/finish/calculate.
-# _progress_callback(phase, current, total, detail) — reports progress
-# _abort_flag() -> bool — returns True to request abort
+
+# Progress callback and abort flag.  Set from the caller before calling
+# loads/finish/calculate.
 _progress_callback = None
 _abort_flag = None
 
+
 class ExcelAbortError(Exception):
     pass
+
 
 def _check_abort():
     if _abort_flag and _abort_flag():
         raise ExcelAbortError("Load aborted by user")
 
+
 def _report_progress(phase, current, total, detail=''):
     if _progress_callback:
         _progress_callback(phase, current, total, detail)
-# ── End progress/abort ──
 
 
 class XlCircular(XlError):
@@ -246,8 +248,12 @@ class ExcelModel:
                 class _Wrapper:
                     __slots__ = ('_fn', '_label', '_fn_times', '_counter', '_total', '_has_progress')
                     def __init__(self, fn, label, fn_times, counter, total, has_progress):
-                        self._fn = fn; self._label = label; self._fn_times = fn_times
-                        self._counter = counter; self._total = total; self._has_progress = has_progress
+                        self._fn = fn
+                        self._label = label
+                        self._fn_times = fn_times
+                        self._counter = counter
+                        self._total = total
+                        self._has_progress = has_progress
                     def __call__(self, *a, **kw):
                         _t = _ptime.perf_counter()
                         _r = self._fn(*a, **kw)
@@ -276,7 +282,9 @@ class ExcelModel:
                 class _ProgressWrapper:
                     __slots__ = ('_fn', '_counter', '_total')
                     def __init__(self, fn, counter, total):
-                        self._fn = fn; self._counter = counter; self._total = total
+                        self._fn = fn
+                        self._counter = counter
+                        self._total = total
                     def __call__(self, *a, **kw):
                         _r = self._fn(*a, **kw)
                         self._counter[0] += 1
@@ -374,12 +382,14 @@ class ExcelModel:
         book, context = self.add_book(filename)
         if _PROF:
             _d = _ptime.perf_counter() - _t0
-            _prof['load > add_book']['t'] += _d; _prof['load > add_book']['n'] += 1
+            _prof['load > add_book']['t'] += _d
+            _prof['load > add_book']['n'] += 1
             _t0 = _ptime.perf_counter()
         self.pushes(*book.worksheets, context=context)
         if _PROF:
             _d = _ptime.perf_counter() - _t0
-            _prof['load > pushes (all sheets)']['t'] += _d; _prof['load > pushes (all sheets)']['n'] += 1
+            _prof['load > pushes (all sheets)']['t'] += _d
+            _prof['load > pushes (all sheets)']['n'] += 1
         return self
 
     def from_ranges(self, *ranges):
@@ -426,7 +436,8 @@ class ExcelModel:
         if _PROF:
             _d = _ptime.perf_counter() - _t0
             _k = f'push({_sheet}) > compile_cell'
-            _prof[_k]['t'] += _d; _prof[_k]['n'] += _n_cells
+            _prof[_k]['t'] += _d
+            _prof[_k]['n'] += _n_cells
             _prof[f'push({_sheet}) > formula_cells']['n'] += _n_formulas
             _prof[f'push({_sheet}) > plain_cells']['n'] += _n_cells - _n_formulas
             _t0 = _ptime.perf_counter()
@@ -436,7 +447,8 @@ class ExcelModel:
         if _PROF:
             _d = _ptime.perf_counter() - _t0
             _k = f'push({_sheet}) > add_cell'
-            _prof[_k]['t'] += _d; _prof[_k]['n'] += len(cells)
+            _prof[_k]['t'] += _d
+            _prof[_k]['n'] += len(cells)
         return self
 
     def add_book(self, book=None, context=None, data_only=False):
@@ -469,7 +481,8 @@ class ExcelModel:
             )
             if _PROF:
                 _d = _ptime.perf_counter() - _t0
-                _prof['add_book > xlreader.load_workbook']['t'] += _d; _prof['add_book > xlreader.load_workbook']['n'] += 1
+                _prof['add_book > xlreader.load_workbook']['t'] += _d
+                _prof['add_book > xlreader.load_workbook']['n'] += 1
 
         if 'external_links' not in data:
             fdir = osp.join(self.basedir, _decode_path(ctx['directory']))
@@ -493,7 +506,8 @@ class ExcelModel:
             data['references'] = self.add_references(book, context=context)
             if _PROF:
                 _d = _ptime.perf_counter() - _t0
-                _prof['add_book > add_references']['t'] += _d; _prof['add_book > add_references']['n'] += 1
+                _prof['add_book > add_references']['t'] += _d
+                _prof['add_book > add_references']['n'] += 1
 
         return book, ctx
 
@@ -805,21 +819,24 @@ class ExcelModel:
             self.complete()
             if _PROF:
                 _d = _ptime.perf_counter() - _t0
-                _prof['finish > complete']['t'] += _d; _prof['finish > complete']['n'] += 1
+                _prof['finish > complete']['t'] += _d
+                _prof['finish > complete']['n'] += 1
         if anchors:
             if _PROF:
                 _t0 = _ptime.perf_counter()
             self.anchors()
             if _PROF:
                 _d = _ptime.perf_counter() - _t0
-                _prof['finish > anchors']['t'] += _d; _prof['finish > anchors']['n'] += 1
+                _prof['finish > anchors']['t'] += _d
+                _prof['finish > anchors']['n'] += 1
         if assemble:
             if _PROF:
                 _t0 = _ptime.perf_counter()
             self.assemble()
             if _PROF:
                 _d = _ptime.perf_counter() - _t0
-                _prof['finish > assemble']['t'] += _d; _prof['finish > assemble']['n'] += 1
+                _prof['finish > assemble']['t'] += _d
+                _prof['finish > assemble']['n'] += 1
         if circular:
             self.solve_circular()
         if _PROF:
@@ -827,7 +844,8 @@ class ExcelModel:
         self.inverse_references()
         if _PROF:
             _d = _ptime.perf_counter() - _t0
-            _prof['finish > inverse_references']['t'] += _d; _prof['finish > inverse_references']['n'] += 1
+            _prof['finish > inverse_references']['t'] += _d
+            _prof['finish > inverse_references']['n'] += 1
         return self
 
     def to_dict(self):
