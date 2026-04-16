@@ -39,6 +39,54 @@ BOOK = sh.Token('Book')
 SHEETS = sh.Token('Sheets')
 CIRCULAR = sh.Token('CIRCULAR')
 
+# Profiling support (set env FORMULAS_PROFILING=1 to enable).
+import time as _ptime
+import collections as _pcoll
+_PROF = os.environ.get('FORMULAS_PROFILING', '0') == '1'
+_prof = _pcoll.defaultdict(lambda: {'t': 0.0, 'n': 0})
+
+
+def _prof_reset():
+    _prof.clear()
+
+
+def _prof_report():
+    if not _prof:
+        return
+    print(f"\n{'=' * 80}")
+    print("  FORMULAS LIBRARY INTERNAL PROFILE")
+    print(f"{'=' * 80}")
+    items = sorted(_prof.items(), key=lambda x: -x[1]['t'])
+    print(f"  {'Operation':<45s} {'Time':>10s} {'Count':>8s} {'Avg':>10s}")
+    print(f"  {'-' * 45} {'-' * 10} {'-' * 8} {'-' * 10}")
+    for name, d in items:
+        avg = d['t'] / d['n'] if d['n'] else 0
+        print(f"  {name:<45s} {d['t']:>9.3f}s {d['n']:>8d} {avg:>9.4f}s")
+    total = sum(d['t'] for d in _prof.values())
+    print(f"  {'-' * 45} {'-' * 10}")
+    print(f"  {'TOTAL profiled':<45s} {total:>9.3f}s")
+    print(f"{'=' * 80}\n")
+
+
+# Progress callback and abort flag.  Set from the caller before calling
+# loads/finish/calculate.
+_progress_callback = None
+_abort_flag = None
+
+
+class ExcelAbortError(Exception):
+    pass
+
+
+def _check_abort():
+    if _abort_flag and _abort_flag():
+        raise ExcelAbortError("Load aborted by user")
+
+
+def _report_progress(phase, current, total, detail=''):
+    if _progress_callback:
+        _progress_callback(phase, current, total, detail)
+
 
 class XlCircular(XlError):
     def __str__(self):
@@ -167,7 +215,107 @@ class ExcelModel:
         return self.calculate(*args, **kwargs)
 
     def calculate(self, *args, **kwargs):
-        return self.dsp.dispatch(*args, **kwargs)
+        _total_nodes = len(self.dsp.function_nodes)
+        _calc_counter = [0]  # mutable for closure access
+        _has_progress = _progress_callback is not None or _abort_flag is not None
+
+        if _PROF:
+            import re as _re
+            _fn_times = _pcoll.defaultdict(lambda: {'t': 0.0, 'n': 0})
+            _originals = {}
+            _func_re = _re.compile(r"^=(?:\w+!)?([A-Z][A-Z0-9_.]+)\(", _re.IGNORECASE)
+            for _fid, _fnode in self.dsp.function_nodes.items():
+                _fn = _fnode['function']
+                _fname = getattr(_fn, '__name__', type(_fn).__name__)
+                if isinstance(_fn, CellWrapper):
+                    _m = _func_re.match(_fname) if isinstance(_fname, str) else None
+                    if _m:
+                        _label = _m.group(1).upper()
+                    elif isinstance(_fname, str) and '!' in _fname:
+                        _label = 'ARITHMETIC'
+                    else:
+                        _label = 'CELL_OTHER'
+                elif isinstance(_fn, RangesAssembler):
+                    _label = 'RangesAssembler'
+                elif isinstance(_fn, InvRangesAssembler):
+                    _label = 'InvRangesAssembler'
+                elif _fname == 'bypass':
+                    _label = 'bypass'
+                else:
+                    _label = type(_fn).__name__
+                _originals[_fid] = _fn
+
+                class _Wrapper:
+                    __slots__ = ('_fn', '_label', '_fn_times', '_counter', '_total', '_has_progress')
+                    def __init__(self, fn, label, fn_times, counter, total, has_progress):
+                        self._fn = fn
+                        self._label = label
+                        self._fn_times = fn_times
+                        self._counter = counter
+                        self._total = total
+                        self._has_progress = has_progress
+                    def __call__(self, *a, **kw):
+                        _t = _ptime.perf_counter()
+                        _r = self._fn(*a, **kw)
+                        _d = _ptime.perf_counter() - _t
+                        self._fn_times[self._label]['t'] += _d
+                        self._fn_times[self._label]['n'] += 1
+                        if self._has_progress:
+                            self._counter[0] += 1
+                            if self._counter[0] % 100 == 0:
+                                _check_abort()
+                                _report_progress('calculate', self._counter[0], self._total, self._label)
+                        return _r
+                    def __getattr__(self, name):
+                        return getattr(self._fn, name)
+
+                _fnode['function'] = _Wrapper(_fn, _label, _fn_times, _calc_counter, _total_nodes, _has_progress)
+
+            _t0 = _ptime.perf_counter()
+
+        elif _has_progress:
+            _originals = {}
+            for _fid, _fnode in self.dsp.function_nodes.items():
+                _fn = _fnode['function']
+                _originals[_fid] = _fn
+
+                class _ProgressWrapper:
+                    __slots__ = ('_fn', '_counter', '_total')
+                    def __init__(self, fn, counter, total):
+                        self._fn = fn
+                        self._counter = counter
+                        self._total = total
+                    def __call__(self, *a, **kw):
+                        _r = self._fn(*a, **kw)
+                        self._counter[0] += 1
+                        if self._counter[0] % 100 == 0:
+                            _check_abort()
+                            _report_progress('calculate', self._counter[0], self._total, '')
+                        return _r
+                    def __getattr__(self, name):
+                        return getattr(self._fn, name)
+
+                _fnode['function'] = _ProgressWrapper(_fn, _calc_counter, _total_nodes)
+
+        _report_progress('calculate', 0, _total_nodes, '')
+        result = self.dsp.dispatch(*args, **kwargs)
+
+        if _PROF:
+            _d = _ptime.perf_counter() - _t0
+            _prof['calculate > dispatch (total)']['t'] += _d
+            _prof['calculate > dispatch (total)']['n'] = _total_nodes
+            _fn_nodes = self.dsp.function_nodes
+            for _fid, _fn in _originals.items():
+                _fn_nodes[_fid]['function'] = _fn
+            for _k, _v in _fn_times.items():
+                _prof[f'  calc > {_k}']['t'] += _v['t']
+                _prof[f'  calc > {_k}']['n'] += _v['n']
+        elif _has_progress:
+            _fn_nodes = self.dsp.function_nodes
+            for _fid, _fn in _originals.items():
+                _fn_nodes[_fid]['function'] = _fn
+
+        return result
 
     def compare(
             self, *fpaths, target=None, actual=None, solution=None,
@@ -229,16 +377,30 @@ class ExcelModel:
         return self
 
     def load(self, filename):
+        if _PROF:
+            _t0 = _ptime.perf_counter()
         book, context = self.add_book(filename)
+        if _PROF:
+            _d = _ptime.perf_counter() - _t0
+            _prof['load > add_book']['t'] += _d
+            _prof['load > add_book']['n'] += 1
+            _t0 = _ptime.perf_counter()
         self.pushes(*book.worksheets, context=context)
+        if _PROF:
+            _d = _ptime.perf_counter() - _t0
+            _prof['load > pushes (all sheets)']['t'] += _d
+            _prof['load > pushes (all sheets)']['n'] += 1
         return self
 
     def from_ranges(self, *ranges):
         return self.complete(ranges)
 
     def pushes(self, *worksheets, context=None):
-        for ws in worksheets:
+        _total_ws = len(worksheets)
+        for _ws_idx, ws in enumerate(worksheets):
+            _report_progress('compile_cells_sheet', _ws_idx, _total_ws, getattr(ws, 'title', '?'))
             self.push(ws, context=context)
+        _report_progress('compile_cells_sheet', _total_ws, _total_ws, 'done')
         return self
 
     def push(self, worksheet, context):
@@ -250,15 +412,43 @@ class ExcelModel:
         ctx = {'external_links': external_links}
         ctx.update(context)
         cells = []
+        _sheet = ctx.get('sheet', '?')
+        if _PROF:
+            _t0 = _ptime.perf_counter()
+            _n_cells = 0
+            _n_formulas = 0
+        _cell_count = 0
+        _total_est = (worksheet.max_row or 0) * (worksheet.max_column or 0)
         for row in worksheet.iter_rows():
             for c in row:
                 if hasattr(c, 'value'):
                     cells.append(self.compile_cell(
                         c, ctx, references, formula_references
                     ))
+                    if _PROF:
+                        _n_cells += 1
+                        if c.data_type == 'f':
+                            _n_formulas += 1
+                _cell_count += 1
+                if _cell_count % 200 == 0:
+                    _check_abort()
+                    _report_progress('compile_cells', _cell_count, _total_est, _sheet)
+        if _PROF:
+            _d = _ptime.perf_counter() - _t0
+            _k = f'push({_sheet}) > compile_cell'
+            _prof[_k]['t'] += _d
+            _prof[_k]['n'] += _n_cells
+            _prof[f'push({_sheet}) > formula_cells']['n'] += _n_formulas
+            _prof[f'push({_sheet}) > plain_cells']['n'] += _n_cells - _n_formulas
+            _t0 = _ptime.perf_counter()
         for cell in cells:
             # noinspection PyTypeChecker
             self.add_cell(sh.await_result(cell), ctx, formula_ranges)
+        if _PROF:
+            _d = _ptime.perf_counter() - _t0
+            _k = f'push({_sheet}) > add_cell'
+            _prof[_k]['t'] += _d
+            _prof[_k]['n'] += len(cells)
         return self
 
     def add_book(self, book=None, context=None, data_only=False):
@@ -284,9 +474,15 @@ class ExcelModel:
         book = data.get(BOOK)
         if not book:
             from .xlreader import load_workbook
+            if _PROF:
+                _t0 = _ptime.perf_counter()
             data[BOOK] = book = load_workbook(
                 osp.join(self.basedir, fpath), data_only=data_only
             )
+            if _PROF:
+                _d = _ptime.perf_counter() - _t0
+                _prof['add_book > xlreader.load_workbook']['t'] += _d
+                _prof['add_book > xlreader.load_workbook']['n'] += 1
 
         if 'external_links' not in data:
             fdir = osp.join(self.basedir, _decode_path(ctx['directory']))
@@ -303,9 +499,15 @@ class ExcelModel:
             }
 
         if 'references' not in data:
+            if _PROF:
+                _t0 = _ptime.perf_counter()
             context = {'external_links': data['external_links']}
             context.update(ctx)
             data['references'] = self.add_references(book, context=context)
+            if _PROF:
+                _d = _ptime.perf_counter() - _t0
+                _prof['add_book > add_references']['t'] += _d
+                _prof['add_book > add_references']['n'] += 1
 
         return book, ctx
 
@@ -455,10 +657,15 @@ class ExcelModel:
             stack = stack.difference(done)
         stack = sorted(stack)
         sheet_limits = {}
+        _complete_iter = 0
         with tqdm.tqdm(total=len(stack)) as pbar:
             while stack:
                 n_id = stack.pop()
                 pbar.update(1)
+                _complete_iter += 1
+                if _complete_iter % 10 == 0:
+                    _check_abort()
+                    _report_progress('build_graph', pbar.n, pbar.total, '')
                 if isinstance(n_id, sh.Token) or n_id in done:
                     continue
                 done.add(n_id)
@@ -508,8 +715,13 @@ class ExcelModel:
                 ctx = {'external_links': external_links}
                 ctx.update(context)
                 cells = []
+                _inner_count = 0
                 for row in it:
                     for c in row:
+                        _inner_count += 1
+                        if _inner_count % 100 == 0:
+                            _check_abort()
+                            _report_progress('build_graph_cells', _inner_count, 0, str(pbar.n))
                         n = _name % c.coordinate
                         if n in self.cells:
                             continue
@@ -517,7 +729,12 @@ class ExcelModel:
                             cells.append(self.compile_cell(
                                 c, ctx, references, formula_references
                             ))
+                _add_count = 0
                 for cell in cells:
+                    _add_count += 1
+                    if _add_count % 50 == 0:
+                        _check_abort()
+                        _report_progress('build_graph_add', _add_count, len(cells), str(pbar.n))
                     # noinspection PyTypeChecker
                     cell = self.add_cell(sh.await_result(cell), ctx,
                                          formula_ranges)
@@ -597,14 +814,38 @@ class ExcelModel:
     def finish(self, complete=True, circular=False, assemble=True,
                anchors=True):
         if complete:
+            if _PROF:
+                _t0 = _ptime.perf_counter()
             self.complete()
+            if _PROF:
+                _d = _ptime.perf_counter() - _t0
+                _prof['finish > complete']['t'] += _d
+                _prof['finish > complete']['n'] += 1
         if anchors:
+            if _PROF:
+                _t0 = _ptime.perf_counter()
             self.anchors()
+            if _PROF:
+                _d = _ptime.perf_counter() - _t0
+                _prof['finish > anchors']['t'] += _d
+                _prof['finish > anchors']['n'] += 1
         if assemble:
+            if _PROF:
+                _t0 = _ptime.perf_counter()
             self.assemble()
+            if _PROF:
+                _d = _ptime.perf_counter() - _t0
+                _prof['finish > assemble']['t'] += _d
+                _prof['finish > assemble']['n'] += 1
         if circular:
             self.solve_circular()
+        if _PROF:
+            _t0 = _ptime.perf_counter()
         self.inverse_references()
+        if _PROF:
+            _d = _ptime.perf_counter() - _t0
+            _prof['finish > inverse_references']['t'] += _d
+            _prof['finish > inverse_references']['n'] += 1
         return self
 
     def to_dict(self):
