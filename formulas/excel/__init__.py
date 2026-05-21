@@ -68,6 +68,56 @@ def _prof_report():
     print(f"{'=' * 80}\n")
 
 
+# ── Cell deactivation by font-color marker ──
+# When env FORMULAS_DEACTIVATE_RGB is set (e.g. "FF123456"), any formula cell
+# whose font color matches that RGB is substituted with a constant at
+# compile time. This skips parse/AST/dependency-graph entry — ~48 KB RSS
+# per skipped formula on tested workbooks.
+#
+# Frozen-value source order (first hit wins):
+#   1. env FORMULAS_DEACTIVATE_VALUE if set (e.g. "0")
+#   2. cell.value if openpyxl read it as data_only (rare in this code path)
+#   3. 0
+_DEACTIVATE_RGB = (os.environ.get('FORMULAS_DEACTIVATE_RGB') or '').upper().strip()
+_DEACTIVATE_DEFAULT = os.environ.get('FORMULAS_DEACTIVATE_VALUE')
+
+
+def _safe_color_rgb(color):
+    """Returns hex RGB string for a cell's font color, or None if theme/indexed
+    or otherwise non-RGB. Tolerant of openpyxl raising on .rgb access for
+    theme colors."""
+    if color is None:
+        return None
+    try:
+        ctype = getattr(color, 'type', None)
+        if ctype != 'rgb':
+            return None
+        rgb = color.rgb
+        if not isinstance(rgb, str):
+            return None
+        return rgb.upper()
+    except (TypeError, AttributeError):
+        return None
+
+
+def _is_deactivated_cell(cell):
+    if not _DEACTIVATE_RGB:
+        return False
+    font = getattr(cell, 'font', None)
+    if font is None:
+        return False
+    return _safe_color_rgb(font.color) == _DEACTIVATE_RGB
+
+
+def _frozen_value_for(cell):
+    if _DEACTIVATE_DEFAULT is not None:
+        try:
+            return float(_DEACTIVATE_DEFAULT)
+        except ValueError:
+            return _DEACTIVATE_DEFAULT
+    return 0
+
+
 # Progress callback and abort flag.  Set from the caller before calling
 # loads/finish/calculate.
 _progress_callback = None
@@ -570,6 +620,16 @@ class ExcelModel:
         crd = cell.coordinate
         crd = formula_references.get(crd, crd)
         val = cell.value
+
+        if cell.data_type == 'f' and _is_deactivated_cell(cell):
+            frozen = _frozen_value_for(cell)
+            if _PROF:
+                _prof['deactivated_cells']['n'] += 1
+            return self._compile_cell(
+                crd, frozen, context, check_formula=False,
+                references=references
+            )
+
         if cell.data_type == 'f':
             if not isinstance(val, str):
                 val = val.text
