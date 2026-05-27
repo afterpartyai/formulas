@@ -31,6 +31,7 @@ _filename_full_range = 'full-range.xlsx'
 _link_filename = 'test_link.xlsx'
 _link_filename_ods = 'test_link.ods'
 _filename_circular = 'circular.xlsx'
+_filename_datatable = 'datatable.xlsx'
 
 
 @unittest.skipIf(EXTRAS not in ('all', 'excel'), 'Not for extra %s.' % EXTRAS)
@@ -337,6 +338,21 @@ class TestExcelModel(unittest.TestCase):
             k: tuple(v.value.ravel()) if isinstance(v, Ranges) else v
             for k, v in xl_model({"A1:A8": [1, 2, 3, 4, 5, 6, 7, 8]}).items()
         })
+
+    def test_excel_model_datatable(self):
+        # Fork patch: an Excel Data Table (What-If) cell is stored as a
+        # DataTableFormula with no `.text`. Before the patch this crashed load
+        # with AttributeError. The patch substitutes an empty value and logs a
+        # warning. Assert the model loads AND ordinary formulas still compute.
+        fname = osp.join(mydir, _filename_datatable)
+        xl_model = ExcelModel().loads(fname).finish()
+        sol = xl_model.calculate()
+        a2 = next(
+            (v for k, v in sol.items() if str(k).upper().endswith('!A2')), None
+        )
+        self.assertIsNotNone(a2, 'A2 missing from solution')
+        val = a2.value if isinstance(a2, Ranges) else a2
+        self.assertEqual(float(val.ravel()[0]), 20.0)
 
     def tearDown(self) -> None:
         shutil.rmtree(osp.join(mydir, 'tmp'), ignore_errors=True)

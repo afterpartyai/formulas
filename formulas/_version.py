@@ -10,11 +10,11 @@ __all__ = ['__version__', '__updated__', '__title__', '__author__',
            '__license__', '__copyright__']
 
 #: Authoritative project's PEP 440 version.
-__version__ = version = "1.3.4.post2"  # Forked: O(n^2) fix + progress/profiling + cell deactivation by font-color marker
+__version__ = version = "1.3.4.post3"  # Forked: O(n^2) fix + progress/profiling + cell deactivation by font-color marker + Data Table (=TABLE) no-crash
 
 # Please UPDATE TIMESTAMP WHEN BUMPING VERSIONS AND BEFORE RELEASE.
 #: Release date.
-__updated__ = "2026-05-21 20:30:00"
+__updated__ = "2026-05-27 19:45:00"
 
 __title__ = 'formulas'
 
