@@ -632,6 +632,20 @@ class ExcelModel:
 
         if cell.data_type == 'f':
             if not isinstance(val, str):
+                # Excel Data Table (What-If) cells are stored as DataTableFormula
+                # objects with no `.text`; the `=TABLE()` construct is unsupported.
+                # They are terminal sensitivity-grid display cells (nothing reads
+                # from them), so substitute an empty constant rather than crash the
+                # whole workbook load. Without this, one such cell aborts the model.
+                if not hasattr(val, 'text'):
+                    log.warning(
+                        'Data Table cell `%s` unsupported by formulas '
+                        '(=TABLE() construct); substituted empty value.', crd
+                    )
+                    return self._compile_cell(
+                        crd, None, context, check_formula=False,
+                        references=references
+                    )
                 val = val.text
             val = val[:2] == '==' and val[1:] or val
         elif cell.data_type == 'n' and isinstance(val, float):
