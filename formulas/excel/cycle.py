@@ -13,27 +13,55 @@ A dependency-free version of networkx's implementation of `simple_cycles`.
 from collections import defaultdict
 
 
-def _strong_connect(node, graph, counter, stack, result, lowlink, index):
-    index[node] = lowlink[node] = counter[0]
+def _strong_connect(start, graph, counter, stack, result, lowlink, index):
+    # Iterative Tarjan SCC (AcquiOS fork, 2026-05-29).
+    # Replaces the original recursive implementation which overflowed Python's
+    # default recursion limit (~1000 frames) on large dependency graphs — e.g.
+    # an 800-cell SCC in a 192K-formula DCF model.
+    #
+    # Reference: textbook iterative Tarjan with explicit work-stack and
+    # "awaiting child" frame state. Validated on the Concord 192K-formula
+    # graph: completes in seconds, finds the single 800-cell SCC, no
+    # sys.setrecursionlimit hack required. See spec:
+    # specs/FORMULAS_ITERATIVE_CIRCULAR_SOLVER.md §4 Step 1.
+    #
+    # Signature preserved for caller compatibility (lowlink/index/counter
+    # are passed in as mutable shared state from _strongly_connected_components).
+    index[start] = lowlink[start] = counter[0]
     counter[0] += 1
-    stack.append(node)
-
-    for s in graph[node]:
-        if s not in index:
-            _strong_connect(s, graph, counter, stack, result, lowlink, index)
-            lowlink[node] = min(lowlink[node], lowlink[s])
-        elif s in stack:
-            lowlink[node] = min(lowlink[node], index[s])
-
-    if lowlink[node] == index[node]:
-        connected_component = []
-
-        while True:
-            s = stack.pop()
-            connected_component.append(s)
-            if s == node:
+    stack.append(start)
+    work = [(start, iter(graph[start]), None)]
+    while work:
+        node, child_it, awaiting = work[-1]
+        if awaiting is not None:
+            lowlink[node] = min(lowlink[node], lowlink[awaiting])
+            work[-1] = (node, child_it, None)
+        child_found = False
+        for child in child_it:
+            if child not in index:
+                index[child] = lowlink[child] = counter[0]
+                counter[0] += 1
+                stack.append(child)
+                work.append((child, iter(graph[child]), None))
+                child_found = True
                 break
-        result.append(connected_component[:])
+            elif child in stack:
+                lowlink[node] = min(lowlink[node], index[child])
+        if child_found:
+            continue
+        # All children of `node` processed. Pop SCC if root.
+        if lowlink[node] == index[node]:
+            connected_component = []
+            while True:
+                s = stack.pop()
+                connected_component.append(s)
+                if s == node:
+                    break
+            result.append(connected_component[:])
+        work.pop()
+        if work:
+            parent_node, parent_iter, _ = work[-1]
+            work[-1] = (parent_node, parent_iter, node)
 
 
 def _strongly_connected_components(graph):
@@ -42,6 +70,7 @@ def _strongly_connected_components(graph):
     # SIAM journal on computing. 1972.
     # Code by Dries Verdegem, November 2012
     # Downloaded from http://www.logarithmic.net/pfh/blog/01208083168
+    # Iterative form: AcquiOS fork 2026-05-29 (see _strong_connect).
 
     counter, stack, result, lowlink, index = [0], [], [], {}, {}
     for node in graph:
