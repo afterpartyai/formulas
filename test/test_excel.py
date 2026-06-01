@@ -32,6 +32,9 @@ _link_filename = 'test_link.xlsx'
 _link_filename_ods = 'test_link.ods'
 _filename_circular = 'circular.xlsx'
 _filename_datatable = 'datatable.xlsx'
+_filename_iter_divergent = 'iter_divergent.xlsx'
+_filename_iter_linear = 'iter_convergent_linear.xlsx'
+_filename_iter_nonlinear = 'iter_convergent_nonlinear.xlsx'
 
 
 @unittest.skipIf(EXTRAS not in ('all', 'excel'), 'Not for extra %s.' % EXTRAS)
@@ -284,6 +287,117 @@ class TestExcelModel(unittest.TestCase):
                 for k, v in xl_model.write(xl_model.books).items()
             })
         )
+
+    def test_iterative_tarjan_no_recursion_limit(self):
+        # AcquiOS fork 2026-05-29: _strong_connect is now iterative.
+        # A 2000-node cycle would overflow Python's default recursion limit
+        # (~1000 frames) under the original recursive implementation.
+        # See specs/FORMULAS_ITERATIVE_CIRCULAR_SOLVER.md §4 Step 1.
+        import sys
+        from formulas.excel.cycle import _strongly_connected_components
+        N = 2000
+        graph = {i: {(i + 1) % N} for i in range(N)}
+        orig_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(1000)
+        try:
+            sccs = _strongly_connected_components(graph)
+        finally:
+            sys.setrecursionlimit(orig_limit)
+        big = [s for s in sccs if len(s) > 1]
+        self.assertEqual(len(big), 1)
+        self.assertEqual(len(big[0]), N)
+
+    def _solve_iterate(self, filename):
+        # Helper: load fixture, run finish(circular=True, iterate=True),
+        # return (solution_dict, last_solve_info). Solution values are
+        # extracted as scalars for convenient assertions.
+        path = osp.join(mydir, filename)
+        xl_mdl = ExcelModel().loads(path).finish(circular=True, iterate=True)
+        sol = xl_mdl.calculate()
+        scalars = {}
+        for k, v in sol.items():
+            val = v.value if hasattr(v, 'value') else v
+            if hasattr(val, 'tolist'):
+                val = val.tolist()
+            while isinstance(val, list) and len(val) == 1:
+                val = val[0]
+            scalars[str(k)] = val
+        return scalars, xl_mdl._last_solve_info
+
+    def test_iterate_divergent_does_not_crash(self):
+        # A1=B1+1; B1=C1+1; C1=A1+1 has no fixed point. Must:
+        #   - not raise
+        #   - mark the SCC as not converged
+        #   - return bounded last-iterate values (not inf/NaN)
+        #   - leave non-cyclic cells (D1, E1) computing correctly
+        scalars, info = self._solve_iterate(_filename_iter_divergent)
+        self.assertEqual(scalars["'[iter_divergent.xlsx]S'!D1"], 42)
+        self.assertEqual(scalars["'[iter_divergent.xlsx]S'!E1"], 84.0)
+        self.assertEqual(len(info['sccs']), 1)
+        scc = info['sccs'][0]
+        self.assertFalse(scc['converged'])
+        self.assertEqual(scc['size'], 3)
+        # Bounded — Excel's iterate_count default is 100, so |x| <= ~100.
+        for c in ('A1', 'B1', 'C1'):
+            v = scalars[f"'[iter_divergent.xlsx]S'!{c}"]
+            self.assertLess(abs(v), 1e6)
+
+    def test_iterate_convergent_linear(self):
+        # gross=1000; fee=0.05*EGI; EGI=gross-fee.
+        # Closed-form: EGI=1000/1.05=952.380952...; fee=47.619047...
+        scalars, info = self._solve_iterate(_filename_iter_linear)
+        self.assertEqual(len(info['sccs']), 1)
+        scc = info['sccs'][0]
+        self.assertTrue(scc['converged'])
+        self.assertEqual(scc['size'], 2)
+        # Convergence to within Excel's default 0.001 tolerance.
+        a2 = scalars["'[iter_convergent_linear.xlsx]S'!A2"]
+        a3 = scalars["'[iter_convergent_linear.xlsx]S'!A3"]
+        a4 = scalars["'[iter_convergent_linear.xlsx]S'!A4"]
+        self.assertAlmostEqual(a2, 1000 * 0.05 / 1.05, delta=0.01)
+        self.assertAlmostEqual(a3, 1000 / 1.05, delta=0.1)
+        # Downstream cell A4=A3*2 must also appear in solution.
+        self.assertAlmostEqual(a4, (1000 / 1.05) * 2, delta=0.2)
+
+    def test_iterate_convergent_nonlinear(self):
+        # fee=MIN(0.05*EGI, cap=40); EGI=gross-fee. MIN engages (5%*EGI=47.62 > 40),
+        # so fee=40, EGI=960. Tests that a non-linear (MIN-bounded) cycle still
+        # converges — either via fixed_point or broyden1 fallback.
+        scalars, info = self._solve_iterate(_filename_iter_nonlinear)
+        self.assertEqual(len(info['sccs']), 1)
+        scc = info['sccs'][0]
+        self.assertTrue(scc['converged'])
+        a2 = scalars["'[iter_convergent_nonlinear.xlsx]S'!A2"]
+        a3 = scalars["'[iter_convergent_nonlinear.xlsx]S'!A3"]
+        self.assertAlmostEqual(a2, 40.0, delta=0.01)
+        self.assertAlmostEqual(a3, 960.0, delta=0.1)
+
+    def test_iterate_off_by_default_preserves_legacy_behavior(self):
+        # Without iterate=True, finish(circular=True) should still produce
+        # the original ERR_CIRCULAR-marked cells, proving we haven't disturbed
+        # the existing graph-rewriting path.
+        path = osp.join(mydir, _filename_iter_linear)
+        xl_mdl = ExcelModel().loads(path).finish(circular=True)
+        sol = xl_mdl.calculate()
+        a3 = sol["'[iter_convergent_linear.xlsx]S'!A3"]
+        v = a3.value if hasattr(a3, 'value') else a3
+        if hasattr(v, 'tolist'):
+            v = v.tolist()
+        while isinstance(v, list) and len(v) == 1:
+            v = v[0]
+        # SCC cells carry the ERR_CIRCULAR sentinel (XlCircular, which
+        # stringifies as "0" and is a subclass of XlError).
+        self.assertIsInstance(v, ERR_CIRCULAR.__class__)
+        # _last_solve_info must report iterate disabled and no SCCs solved.
+        self.assertFalse(xl_mdl._last_solve_info['iterate_enabled'])
+        self.assertEqual(xl_mdl._last_solve_info['sccs'], [])
+
+    def test_iterate_method_used_pinned_for_linear(self):
+        # Pin the solver method for the linear case so we detect silent
+        # solver-strategy regressions (e.g. scipy.optimize.fixed_point
+        # being downgraded behind the scenes).
+        _, info = self._solve_iterate(_filename_iter_linear)
+        self.assertEqual(info['sccs'][0]['method'], 'fixed_point')
 
     def test_excel_model_full_range(self):
         fname = osp.basename(self.filename_full_range)

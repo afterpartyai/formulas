@@ -2,6 +2,81 @@ Changelog
 =========
 
 
+v1.3.4.post4 (2026-05-29) — AcquiOS fork
+-----------------------------------------
+
+Feat
+~~~~
+- (excel): Add opt-in iterative circular-reference solver. When
+  ``finish(circular=True, iterate=True)`` is passed, SCCs that Phase A's
+  IF-rewrite cannot statically dissolve are handed to a new scipy 3-tier
+  iterative solver (``fixed_point`` Steffensen+Aitken Δ² → ``broyden1``
+  quasi-Newton → plain Gauss-Seidel). Converged values are written back to
+  ``dsp.default_values`` so subsequent ``.calculate()`` reads see them.
+  Honors workbook iterativeCalculation settings (iterateCount, iterateDelta)
+  with Excel defaults (100 iterations, 0.001 tolerance) as fallback.
+
+- (excel): Phase B pre-solves the workbook once via ``self.calculate()`` to
+  populate non-SCC inputs as correctly-assembled ``Ranges`` objects. SCC
+  cells that consume ranges (INDEX/MATCH/VLOOKUP/SUM(range)/...) now receive
+  real Ranges arguments at iteration time instead of scalar zeros.
+
+- (excel): Phase A's IF-rewrite is skipped entirely when
+  ``iterate=True``. The original optimistic rewrite (substitute cyclic
+  inputs with ERR_CIRCULAR) is preserved unchanged for ``iterate=False``
+  — backward-compatible with the parameterized-function-compilation use
+  case where callers feed in different condition values via
+  ``model.compile(...)(False)`` vs ``(True)``.
+
+- (excel): Three env-gated diagnostic instrumentations added with zero
+  runtime cost when unset: ``FORMULAS_TIMING=1`` (per-phase wall-clock
+  logging), ``FORMULAS_SCC_TRACE=<substr>...`` (per-cell SCC trajectory
+  trace), ``FORMULAS_PHASE_A_CYCLE_CAP`` (override per-SCC elementary-cycle
+  enumeration cap, default 10000).
+
+Fix
+~~~
+- (excel): Phase A no longer hangs on workbooks with large SCCs. The
+  original ``solve_circular`` called ``simple_cycles(dmap.succ)`` —
+  Johnson's algorithm with O((V+E)·C) complexity where C is the
+  elementary-cycle count. On a 192K-formula DCF workbook with one 800-cell
+  SCC and ~110 back-edges, C is exponential and ``simple_cycles`` ran for
+  >30 minutes without returning. Replaced with iterative-Tarjan SCC
+  discovery (O(V+E)) followed by per-SCC bounded cycle enumeration capped
+  at 10,000 cycles. SCCs exceeding the cap skip IF-rewrite entirely and
+  route to Phase B. Phase A wall-clock on the same 192K-formula workbook:
+  was >1800s (timeout), now 2–13s.
+
+- (excel/cycle): Replaced recursive ``_strong_connect`` with an iterative
+  implementation using an explicit work-stack. The original recursive
+  Tarjan blew Python's default recursion limit (~990 frames) on graphs
+  with deep dependency chains. Iterative form requires no
+  ``sys.setrecursionlimit`` hack and runs in seconds on 192K-formula
+  graphs.
+
+Test
+~~~~
+- (test): 6 new unit tests in ``test/test_excel.py`` for the iterative
+  solver: convergent linear, convergent nonlinear, divergent
+  doesn't-crash, off-by-default preserves legacy behavior, method-pinned
+  for linear, iterative Tarjan no recursion limit.
+
+- (test): New ``test/integration/`` directory with reusable diagnostic
+  scripts: ``diagnose_concord_phases.py``,
+  ``h1_1_phase_a_breakdown.py``, ``build_synthetic_sccs.py``,
+  ``h2_scc_scaling_sweep.py``, ``validate_concord_solver.py``.
+
+Notes
+~~~~~
+- Backward-compatible. With ``iterate=False`` (the default), every
+  existing test passes unchanged: ``test_excel_model_compile`` still
+  asserts ``func(True).value[0,0] is ERR_CIRCULAR``;
+  ``test_excel_model_cycles`` still produces the same rewritten workbook.
+
+- Design and verification record:
+  ``specs/FORMULAS_ITERATIVE_CIRCULAR_SOLVER.md``.
+
+
 v1.3.4 (2026-03-11)
 -------------------
 

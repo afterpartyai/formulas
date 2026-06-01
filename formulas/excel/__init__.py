@@ -146,6 +146,41 @@ class XlCircular(XlError):
 ERR_CIRCULAR = XlCircular('#CIRC!')
 
 
+# AcquiOS fork helpers for the iterative circular-reference solver.
+# See specs/FORMULAS_ITERATIVE_CIRCULAR_SOLVER.md §3.1.
+
+def _to_scalar(x):
+    # Coerce a cell-function output (Ranges / numpy Array / scalar) to float.
+    if hasattr(x, 'value'):
+        x = x.value
+    if hasattr(x, 'tolist'):
+        x = x.tolist()
+    while isinstance(x, list) and len(x) == 1:
+        x = x[0]
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _make_scalar_ranges(qualified_name, value):
+    # Build a Ranges object holding a single scalar value at the given address.
+    # qualified_name e.g. "'[wb]Sheet'!A2"
+    return Ranges().push(qualified_name, np.asarray([[value]], dtype=object))
+
+
+def _read_scalar_from_dsp(dsp, key):
+    # Read the current value of a non-SCC cell from the dispatcher's default
+    # values. Returns 0.0 if absent (Excel's default seed convention).
+    try:
+        entry = dsp.default_values.get(key)
+        if entry is None:
+            return 0.0
+        return _to_scalar(entry.get('value', 0.0))
+    except (AttributeError, KeyError):
+        return 0.0
+
+
 def _get_name(name, names):
     if name not in names:
         name = name.upper()
@@ -260,6 +295,15 @@ class ExcelModel:
         self.cells = {}
         self.books = {}
         self.basedir = None
+        # AcquiOS fork 2026-05-29: cached cell values from a data_only=True
+        # openpyxl pass on each loaded workbook. Used by Phase B's iterative
+        # solver as a non-zero seed to escape trivial fixed points on
+        # homogeneous SCCs (e.g. DCF revenue/expense feedback). Maps qualified
+        # cell address (matching formulas-lib's internal format,
+        # "'[file]SHEET'!CELL") to float. Empty when no workbook was loaded
+        # from a file path. See specs/FORMULAS_ITERATIVE_CIRCULAR_SOLVER.md
+        # §3.5c "Phase B seed fix".
+        self._cached_values = {}
 
     def __call__(self, *args, **kwargs):
         return self.calculate(*args, **kwargs)
@@ -424,7 +468,54 @@ class ExcelModel:
     def loads(self, *file_names):
         for filename in file_names:
             self.load(filename)
+            # AcquiOS fork 2026-05-29: parallel data_only=True pass to
+            # populate _cached_values for Phase B seeding. Best-effort —
+            # any failure here is non-fatal and just means Phase B falls
+            # back to a zero seed for cells without cached values.
+            try:
+                self._load_cached_values(filename)
+            except Exception as e:
+                log.warning("Failed to load cached values from %s: %s", filename, e)
         return self
+
+    def _load_cached_values(self, filename):
+        # Populate self._cached_values from a data_only=True openpyxl pass.
+        # Key format: "'[FILENAME]SHEET'!CELL" matching formulas-lib's
+        # internal qualified-cell convention (see Ranges._push and the
+        # output of cell.range.ranges[0]['name']).
+        from openpyxl import load_workbook as _openpyxl_load
+        if not isinstance(filename, str) or not osp.isfile(filename):
+            return  # stream/buffer/non-file load — nothing to cache
+        wb = _openpyxl_load(filename, data_only=True, read_only=True)
+        # AcquiOS fork 2026-05-29: formulas-lib preserves the original
+        # filename case in its qualified SCC keys (e.g. seen on Concord:
+        # `'[recalc_sanitized_1052.xlsx]ANNUAL PROFORMA'!G132`) while
+        # uppercasing the sheet name. Match that exact convention.
+        fname = osp.basename(filename)
+        n_added = 0
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            sheet_upper = sheet_name.upper()
+            prefix = "'[%s]%s'!" % (fname, sheet_upper)
+            for row in ws.iter_rows(values_only=False):
+                for cell in row:
+                    v = cell.value
+                    if v is None:
+                        continue
+                    try:
+                        fv = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if fv != fv or abs(fv) > 1e15:  # NaN or out-of-bounds
+                        continue
+                    key = prefix + cell.coordinate
+                    self._cached_values[key] = fv
+                    n_added += 1
+        wb.close()
+        import os as _os_cv
+        if _os_cv.environ.get('FORMULAS_TIMING') == '1':
+            log.warning("[FORMULAS_TIMING] cached_values_loaded: %d numeric "
+                        "cells from %s", n_added, filename)
 
     def load(self, filename):
         if _PROF:
@@ -886,7 +977,7 @@ class ExcelModel:
                             ).extend(nodes[out]['filters'])
 
     def finish(self, complete=True, circular=False, assemble=True,
-               anchors=True):
+               anchors=True, iterate=False, iter_max=None, iter_tol=None):
         if complete:
             if _PROF:
                 _t0 = _ptime.perf_counter()
@@ -912,7 +1003,8 @@ class ExcelModel:
                 _prof['finish > assemble']['t'] += _d
                 _prof['finish > assemble']['n'] += 1
         if circular:
-            self.solve_circular()
+            self.solve_circular(iterate=iterate, iter_max=iter_max,
+                                iter_tol=iter_tol)
         if _PROF:
             _t0 = _ptime.perf_counter()
         self.inverse_references()
@@ -1068,30 +1160,127 @@ class ExcelModel:
 
         return func
 
-    def solve_circular(self):
-        from .cycle import simple_cycles
+    def solve_circular(self, iterate=False, iter_max=None, iter_tol=None):
+        # Phase A — graph-rewriting cycle handler.
+        # ORIGINAL behavior: enumerate every elementary cycle in dmap.succ
+        # (Johnson's algorithm via simple_cycles), then iterate per-cycle and
+        # try to "cut" each one by rewriting an IF whose non-cycle branch is
+        # statically safe. Cells where rewrite fails get ERR_CIRCULAR.
+        #
+        # AcquiOS fork 2026-05-29: Johnson's is O((V+E)(C+1)) where C is the
+        # elementary-cycle count. On a 192K-formula DCF model with one 800-
+        # cell SCC (Concord Remington, 110 back-edges) C is exponential and
+        # simple_cycles ran >30 min without returning (FORMULAS_TIMING=1 H1.1
+        # data; specs/FORMULAS_ITERATIVE_CIRCULAR_SOLVER.md §3.5c).
+        #
+        # Fix: SCC-first dispatch. Discover SCCs in O(V+E) using the iterative
+        # Tarjan we already have. For each SCC of size > 1, run simple_cycles
+        # only WITHIN that SCC subgraph, with a hard cycle-count cap. If an
+        # SCC contains too many cycles to enumerate safely, skip the rewrite
+        # pass entirely and mark all its data nodes as unbreakable — Phase B
+        # iterative solver then handles it. This preserves the per-elementary-
+        # cycle rewrite semantics on small SCCs (where the original test
+        # fixtures live) and degrades gracefully on large ones.
+        from .cycle import simple_cycles, _strongly_connected_components
         from collections import Counter
+        import os as _os, time as _time
+        _timing = _os.environ.get('FORMULAS_TIMING') == '1'
+        # Cap on elementary cycles enumerated per SCC. Above this, fall back
+        # to "whole SCC unbreakable" and let Phase B iterate. Env-overridable.
+        _cycle_cap = int(_os.environ.get('FORMULAS_PHASE_A_CYCLE_CAP', '10000'))
+        def _t(label, t0):
+            if _timing:
+                log.warning("[FORMULAS_TIMING] %s: %.3fs", label, _time.perf_counter() - t0)
+        _t0_total = _time.perf_counter()
         mod, dsp = {}, self.dsp
         f_nodes, d_nodes, dmap = dsp.function_nodes, dsp.data_nodes, dsp.dmap
         skip_nodes = {
             k for k, node in f_nodes.items()
             if isinstance(node['function'], InvRangesAssembler)
         }
+        _t('PhaseA.skip_nodes_build', _t0_total)
 
-        cycles = list(simple_cycles(dmap.succ, skip_nodes=skip_nodes))
-        cycles_nodes = Counter(sum(cycles, []))
-        for cycle in sorted(map(set, cycles)):
-            cycles_nodes.subtract(cycle)
-            active_nodes = {k for k, v in cycles_nodes.items() if v}
-            for k in sorted(cycle.intersection(f_nodes)):
-                if _check_cycles(dmap, k, f_nodes, cycle, active_nodes, mod):
+        # SCC discovery over the full dependency graph minus skip_nodes.
+        _t0 = _time.perf_counter()
+        full_succ = {
+            v: set(nbrs) - skip_nodes
+            for v, nbrs in dmap.succ.items()
+            if v not in skip_nodes
+        }
+        sccs = [s for s in _strongly_connected_components(full_succ) if len(s) > 1]
+        _t('PhaseA.scc_discovery', _t0)
+        if _timing:
+            log.warning("[FORMULAS_TIMING] PhaseA.scc_discovery: %d SCCs of size > 1", len(sccs))
+
+        # Per-SCC cycle enumeration + IF-rewrite.
+        _t0 = _time.perf_counter()
+        unbreakable_cells = set()
+        cycles_total = 0
+        sccs_capped = 0
+        for scc_list in sccs:
+            scc_set = set(scc_list)
+            # simple_cycles within just this SCC's subgraph (bounded by SCC size).
+            scc_succ = {v: full_succ[v] & scc_set for v in scc_set}
+            # Enumerate cycles up to the cap; if we hit the cap, bail on this
+            # SCC's rewrite and mark all data nodes unbreakable.
+            cycles = []
+            capped = False
+            for cyc in simple_cycles(scc_succ, copy=False):
+                cycles.append(cyc)
+                if len(cycles) > _cycle_cap:
+                    capped = True
                     break
-            else:
-                cycles_nodes.update(cycle)
-                dist = sh.inf(len(cycle) + 1, 0)
-                for k in sorted(cycle.intersection(d_nodes)):
+            if capped:
+                sccs_capped += 1
+                if _timing:
+                    log.warning(
+                        "[FORMULAS_TIMING] PhaseA.scc_capped: SCC size %d exceeded %d-cycle cap, "
+                        "marking %d data nodes unbreakable",
+                        len(scc_set), _cycle_cap, len(scc_set & set(d_nodes))
+                    )
+                dist = sh.inf(len(scc_set) + 1, 0)
+                for k in sorted(scc_set.intersection(d_nodes)):
                     dsp.set_default_value(k, ERR_CIRCULAR, dist)
+                    unbreakable_cells.add(k)
+                continue
+            cycles_total += len(cycles)
+            # AcquiOS fork 2026-05-29: when iterate=True, skip the IF-rewrite
+            # entirely. The rewrite substitutes ERR_CIRCULAR for cyclic IF
+            # branches; XlCircular.__str__ returns '0', so arithmetic predecessors
+            # silently coerce the error to 0, and IF(true, 0, safe_branch) returns
+            # 0 — masking what should have been an iterative cycle. With iterate=True
+            # the user has opted into Phase B, so leave the cycle intact and let
+            # Phase B compute the real fixed point. With iterate=False, preserve
+            # the legacy parameterized-function behavior (test_excel_model_compile
+            # asserts func(True) returns ERR_CIRCULAR).
+            if iterate:
+                dist = sh.inf(len(scc_set) + 1, 0)
+                for k in sorted(scc_set.intersection(d_nodes)):
+                    dsp.set_default_value(k, ERR_CIRCULAR, dist)
+                    unbreakable_cells.add(k)
+                continue
+            # Per-elementary-cycle rewrite (preserves original semantics).
+            cycles_nodes = Counter(sum(cycles, []))
+            for cycle in sorted(map(set, cycles)):
+                cycles_nodes.subtract(cycle)
+                active_nodes = {k for k, v in cycles_nodes.items() if v}
+                for k in sorted(cycle.intersection(f_nodes)):
+                    if _check_cycles(dmap, k, f_nodes, cycle, active_nodes, mod):
+                        break
+                else:
+                    cycles_nodes.update(cycle)
+                    dist = sh.inf(len(cycle) + 1, 0)
+                    for k in sorted(cycle.intersection(d_nodes)):
+                        dsp.set_default_value(k, ERR_CIRCULAR, dist)
+                        unbreakable_cells.add(k)
+        _t('PhaseA.if_rewrite_pass', _t0)
+        if _timing:
+            log.warning(
+                "[FORMULAS_TIMING] PhaseA.cycles_enumerated_total: %d (across %d SCCs, %d capped)",
+                cycles_total, len(sccs), sccs_capped
+            )
 
+        _t0 = _time.perf_counter()
         if mod:  # Update dsp.
             dsp.add_data(CIRCULAR, ERR_CIRCULAR)
 
@@ -1100,8 +1289,255 @@ class ExcelModel:
                 d['inputs'] = [CIRCULAR if i in v else i for i in d['inputs']]
                 dmap.remove_edges_from(((i, k) for i in v))
                 dmap.add_edge(CIRCULAR, k)
+        _t('PhaseA.dsp_mutation', _t0)
+        _t('PhaseA.TOTAL', _t0_total)
+
+        # Phase B — opt-in iterative solver.
+        # AcquiOS fork, 2026-05-29. See specs/FORMULAS_ITERATIVE_CIRCULAR_SOLVER.md.
+        # For each SCC of "unbreakable" cells (where Phase A's IF-rewrite
+        # couldn't statically dissolve the cycle), iterate to a fixed point
+        # using scipy.optimize.fixed_point, with broyden1 and plain Gauss-
+        # Seidel as fallbacks. Writes converged values back to dsp.default_values
+        # so they appear in subsequent .calculate() output.
+        self._last_solve_info = {'sccs': [], 'iterate_enabled': iterate}
+        if not iterate or not unbreakable_cells:
+            return self
+
+        # Build dependency map restricted to the unbreakable cells (and their
+        # function nodes' predecessors), then take SCCs of size > 1.
+        sub_succ = {
+            v: set(nbrs) - skip_nodes
+            for v, nbrs in dmap.succ.items()
+            if v not in skip_nodes
+        }
+        sccs = [
+            s for s in _strongly_connected_components(sub_succ)
+            if len(s) > 1 and any(c in unbreakable_cells for c in s)
+        ]
+        if not sccs:
+            return self
+
+        # Read iterative-calc config from the workbook with Excel defaults.
+        wb_iter_count, wb_iter_delta = self._read_workbook_iterate_config()
+        max_iter = iter_max or wb_iter_count or 100
+        tolerance = iter_tol or wb_iter_delta or 0.001
+
+        for raw_scc in sccs:
+            # Restrict to data nodes (cell addresses) that have a corresponding
+            # Cell object with .func. Function nodes inside the SCC are reached
+            # via cell.func, not solved directly.
+            scc = [c for c in raw_scc if c in self.cells and self.cells[c].func]
+            if not scc:
+                continue
+            self._solve_scc_iteratively(scc, max_iter, tolerance)
 
         return self
+
+    def _read_workbook_iterate_config(self):
+        # Returns (iterateCount, iterateDelta) from the first workbook's
+        # calcPr, or (None, None) if unavailable.
+        try:
+            wb = next(iter(self.books.values())).get(BOOK)
+            calc = wb.calculation
+            return calc.iterateCount, calc.iterateDelta
+        except (AttributeError, StopIteration, KeyError):
+            return None, None
+
+    def _solve_scc_iteratively(self, scc, max_iter, tolerance):
+        # scc is a list of qualified cell addresses (e.g. "'[wb]Sheet'!A2").
+        # Each cell has a CellWrapper at self.cells[c].func that takes one
+        # arg per entry in self.cells[c].inputs. Args may be either scalar
+        # Ranges (single-cell inputs) OR multi-cell Ranges (range inputs to
+        # INDEX/MATCH/VLOOKUP/SUM-style functions).
+        import numpy as np
+        from scipy.optimize import fixed_point, broyden1
+
+        scc_set = set(scc)
+        scc_idx = {c: i for i, c in enumerate(scc)}
+
+        # AcquiOS fork 2026-05-29: pre-compute the full workbook solution once
+        # so we have correctly-assembled Ranges objects for ALL non-SCC inputs
+        # the SCC depends on — including ranges like Refs!A1:A3 that need
+        # RangesAssembler to build. The prior approach read scalar default_values
+        # which silently returned 0 for range keys, making INDEX/MATCH inside
+        # cyclic IF branches evaluate to 0 (Test 4 toggle=1 reproduces).
+        try:
+            pre_sol = self.calculate()
+        except Exception as e:
+            log.warning("Phase B pre-solve calculate() failed: %s — falling back "
+                        "to scalar default reads", e)
+            pre_sol = {}
+
+        # Build frozen inputs from pre_sol when possible, falling back to scalar
+        # default reads for keys not in the solution.
+        frozen = {}
+        for c in scc:
+            cell_obj = self.cells[c]
+            for k in cell_obj.inputs:
+                if k in scc_set or k in frozen:
+                    continue
+                if k in pre_sol:
+                    frozen[k] = pre_sol[k]  # already a Ranges object
+                else:
+                    frozen[k] = _make_scalar_ranges(
+                        k, _read_scalar_from_dsp(self.dsp, k)
+                    )
+
+        def g(x):
+            # Snapshot for this iteration: frozen inputs as-is, SCC cells
+            # wrapped as scalar Ranges with the current iterate.
+            snap = dict(frozen)
+            for c, v in zip(scc, x):
+                snap[c] = _make_scalar_ranges(c, float(v))
+            out = np.zeros(len(scc))
+            for c in scc:
+                cell_obj = self.cells[c]
+                in_keys = list(cell_obj.inputs)
+                args = [snap[k] for k in in_keys]
+                try:
+                    res = cell_obj.func(*args)
+                except Exception:
+                    # Cell function blew up on this iterate — leave value as-is.
+                    out[scc_idx[c]] = _to_scalar(snap[c])
+                    continue
+                out[scc_idx[c]] = _to_scalar(res)
+            return out
+
+        # AcquiOS fork 2026-05-29: seed from cached values when available;
+        # fall back to 1.0 (NOT 0.0) for cells without cached values. Many
+        # DCF SCCs are homogeneous (g(0)=0 is a valid trivial fixed point)
+        # so the zero seed traps Steffensen on the wrong solution. A
+        # non-zero seed breaks the homogeneous symmetry. Final fallback is
+        # zero only if 1.0 produces non-finite g() output.
+        x0 = np.ones(len(scc))
+        n_seeded = 0
+        for i, c in enumerate(scc):
+            v = self._cached_values.get(c)
+            if v is not None:
+                x0[i] = v
+                n_seeded += 1
+        import os as _os_seed
+        if _os_seed.environ.get('FORMULAS_TIMING') == '1':
+            log.warning("[FORMULAS_TIMING] Phase_B_seed: %d/%d cells seeded "
+                        "from cached values, rest = 1.0", n_seeded, len(scc))
+        converged, x_star, method_used = False, x0, None
+
+        # AcquiOS fork 2026-05-29 — diagnostic instrumentation (env-gated).
+        # FORMULAS_SCC_TRACE=A1,A2,... dumps the SCC trajectory for cells whose
+        # qualified address contains any of those substrings. Logs: x0 value,
+        # final x_star, g(x_star), residual. Helps diagnose "converged but to
+        # wrong fixed point" failure modes (e.g. trivial zero fixed point).
+        import os as _os_diag
+        _trace_keys = [k.strip() for k in
+                       _os_diag.environ.get('FORMULAS_SCC_TRACE', '').split(',')
+                       if k.strip()]
+        if _trace_keys:
+            _trace_idx = [
+                (i, c) for i, c in enumerate(scc)
+                if any(tk.upper() in c.upper() for tk in _trace_keys)
+            ]
+            if _trace_idx:
+                log.warning("[FORMULAS_SCC_TRACE] SCC size=%d, tracing %d cells",
+                            len(scc), len(_trace_idx))
+                gx0 = g(x0)
+                for i, c in _trace_idx:
+                    log.warning("[FORMULAS_SCC_TRACE]   x0[%s] = %g, g(x0)[%s] = %g",
+                                c, x0[i], c, gx0[i])
+        else:
+            _trace_idx = None
+
+        # Sanity bound: DCF values rarely exceed 1e12 (a trillion). Anything
+        # beyond this is broyden1 / fixed_point marching off to infinity on a
+        # divergent system — a relative-residual check can't catch this because
+        # at huge |x| even non-zero residuals look proportionally tiny.
+        DIVERGENCE_BOUND = 1e15
+
+        def _verify(x):
+            # Post-hoc convergence check. Must reject:
+            #  - non-finite values
+            #  - values that exploded past DIVERGENCE_BOUND (divergent system)
+            #  - residuals (in absolute terms) larger than tolerance
+            if not np.all(np.isfinite(x)):
+                return False
+            if np.max(np.abs(x)) > DIVERGENCE_BOUND:
+                return False
+            gx = g(x)
+            if not np.all(np.isfinite(gx)):
+                return False
+            abs_res = np.max(np.abs(gx - x))
+            rel_res = np.max(np.abs(gx - x) / np.maximum(np.abs(x), 1.0))
+            # Accept if either absolute or relative residual is tight.
+            return abs_res < tolerance * 100 or rel_res < tolerance
+
+        # Tier 1: scipy.optimize.fixed_point (Steffensen + Aitken Δ²).
+        try:
+            cand = fixed_point(g, x0, xtol=tolerance, maxiter=max_iter,
+                               method='del2')
+            if _verify(cand):
+                x_star, converged, method_used = cand, True, 'fixed_point'
+        except RuntimeError:
+            pass
+
+        # Tier 2: scipy.optimize.broyden1 (quasi-Newton).
+        if not converged:
+            try:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    cand = broyden1(lambda x: g(x) - x, x0,
+                                    f_tol=tolerance, maxiter=max_iter)
+                if _verify(cand):
+                    x_star, converged, method_used = cand, True, 'broyden'
+            except Exception:
+                pass
+
+        # Tier 3: plain Gauss-Seidel fallback.
+        if not converged:
+            prev = x0.copy()
+            for i in range(max_iter):
+                new = g(prev)
+                if not np.all(np.isfinite(new)):
+                    # Divergence — bail and report.
+                    x_star, method_used = prev, 'gauss_seidel_diverged'
+                    break
+                rel_change = np.max(
+                    np.abs(new - prev) / np.maximum(np.abs(prev), 1.0)
+                )
+                if rel_change < tolerance:
+                    converged, method_used = True, 'gauss_seidel'
+                    x_star = new
+                    break
+                prev = new
+            else:
+                # Max iterations hit without convergence — return last iterate.
+                x_star, method_used = prev, 'gauss_seidel_unconverged'
+
+        # Post-solve trace (FORMULAS_SCC_TRACE).
+        if _trace_idx:
+            gxstar = g(x_star)
+            log.warning("[FORMULAS_SCC_TRACE] post-solve: method=%s, converged=%s",
+                        method_used, converged)
+            for i, c in _trace_idx:
+                resid = gxstar[i] - x_star[i]
+                log.warning(
+                    "[FORMULAS_SCC_TRACE]   x_star[%s] = %g, g(x_star)[%s] = %g, "
+                    "residual = %g", c, x_star[i], c, gxstar[i], resid
+                )
+
+        # Write converged values back to the dispatcher so they appear in
+        # subsequent .calculate() output. Override the ERR_CIRCULAR default
+        # value set by Phase A.
+        for c, v in zip(scc, x_star):
+            try:
+                self.dsp.set_default_value(c, _make_scalar_ranges(c, float(v)))
+            except Exception as e:
+                log.warning("Failed to write converged value for %s: %s", c, e)
+
+        self._last_solve_info['sccs'].append({
+            'cells': list(scc),
+            'size': len(scc),
+            'converged': converged,
+            'method': method_used,
+            'final_values': {c: float(v) for c, v in zip(scc, x_star)},
+        })
 
 
 def _check_range_all_cycles(nodes, active_nodes, j):
